@@ -818,77 +818,96 @@ class smc:
             liquidity_end = np.full(n, np.nan, dtype=np.float32)
             liquidity_swept = np.full(n, np.nan, dtype=np.float32)
 
-            # Causal grouping: process swings in temporal order
-            # pending_bull: list of [start_idx, [levels], last_idx] - groups waiting for more members
+            # Interleaved grouping + sweep in a single bar-by-bar pass.
+            # pending groups: [start_idx, [levels], last_idx, avg_level]
             pending_bull = []
             pending_bear = []
+            # confirmed groups awaiting sweep: (start_idx, threshold)
+            active_liq = []
 
-            swing_indices = np.nonzero(~np.isnan(shl_HL))[0]
-            for i in swing_indices:
-                pip_range_i = (running_high[i] - running_low[i]) * range_percent
+            for bar in range(n):
+                pip_range_bar = (running_high[bar] - running_low[bar]) * range_percent
 
-                if shl_HL[i] == 1:
-                    # Try to join an existing pending bullish group
+                # 1. Check sweeps for confirmed groups
+                for liq_info in active_liq.copy():
+                    liq_idx, threshold, direction = liq_info
+                    if bar <= liq_idx:
+                        continue
+                    if direction == 1 and ohlc_high[bar] >= threshold:
+                        liquidity_swept[liq_idx] = bar
+                        active_liq.remove(liq_info)
+                    elif direction == -1 and ohlc_low[bar] <= threshold:
+                        liquidity_swept[liq_idx] = bar
+                        active_liq.remove(liq_info)
+
+                # 2. Check sweeps for pending groups (closes them, preventing new members)
+                for g in pending_bull.copy():
+                    g_start, g_levels, g_last = g
+                    avg = sum(g_levels) / len(g_levels)
+                    if bar > g_last and ohlc_high[bar] >= avg + pip_range_bar:
+                        if len(g_levels) > 1:
+                            liquidity[g_start] = 1
+                            liquidity_level[g_start] = avg
+                            liquidity_end[g_start] = g_last
+                            liquidity_swept[g_start] = bar
+                        pending_bull.remove(g)
+
+                for g in pending_bear.copy():
+                    g_start, g_levels, g_last = g
+                    avg = sum(g_levels) / len(g_levels)
+                    if bar > g_last and ohlc_low[bar] <= avg - pip_range_bar:
+                        if len(g_levels) > 1:
+                            liquidity[g_start] = -1
+                            liquidity_level[g_start] = avg
+                            liquidity_end[g_start] = g_last
+                            liquidity_swept[g_start] = bar
+                        pending_bear.remove(g)
+
+                # 3. If this bar has a swing, try to join/create group
+                if shl_HL[bar] == 1:
                     joined = False
                     for g in pending_bull:
                         g_start, g_levels, g_last = g
                         avg = sum(g_levels) / len(g_levels)
-                        if abs(shl_Level[i] - avg) <= pip_range_i:
-                            g_levels.append(shl_Level[i])
-                            g[2] = i  # update last index
+                        if abs(shl_Level[bar] - avg) <= pip_range_bar:
+                            g_levels.append(shl_Level[bar])
+                            g[2] = bar
                             joined = True
                             break
                     if not joined:
-                        pending_bull.append([i, [shl_Level[i]], i])
+                        pending_bull.append([bar, [shl_Level[bar]], bar])
 
-                elif shl_HL[i] == -1:
+                elif shl_HL[bar] == -1:
                     joined = False
                     for g in pending_bear:
                         g_start, g_levels, g_last = g
                         avg = sum(g_levels) / len(g_levels)
-                        if abs(shl_Level[i] - avg) <= pip_range_i:
-                            g_levels.append(shl_Level[i])
-                            g[2] = i
+                        if abs(shl_Level[bar] - avg) <= pip_range_bar:
+                            g_levels.append(shl_Level[bar])
+                            g[2] = bar
                             joined = True
                             break
                     if not joined:
-                        pending_bear.append([i, [shl_Level[i]], i])
+                        pending_bear.append([bar, [shl_Level[bar]], bar])
 
-            # Emit confirmed groups (2+ members)
+            # Emit remaining confirmed (2+ member) unswept groups
             for g in pending_bull:
                 g_start, g_levels, g_last = g
                 if len(g_levels) > 1:
+                    avg = sum(g_levels) / len(g_levels)
                     liquidity[g_start] = 1
-                    liquidity_level[g_start] = sum(g_levels) / len(g_levels)
+                    liquidity_level[g_start] = avg
                     liquidity_end[g_start] = g_last
+                    active_liq.append((g_start, avg + pip_range_bar, 1))
 
             for g in pending_bear:
                 g_start, g_levels, g_last = g
                 if len(g_levels) > 1:
+                    avg = sum(g_levels) / len(g_levels)
                     liquidity[g_start] = -1
-                    liquidity_level[g_start] = sum(g_levels) / len(g_levels)
+                    liquidity_level[g_start] = avg
                     liquidity_end[g_start] = g_last
-
-            # Bar-by-bar sweep tracking (also uses causal pip_range)
-            active_liq = []
-            for i in range(n):
-                if not np.isnan(liquidity[i]):
-                    pip_range_i = (running_high[i] - running_low[i]) * range_percent
-                    if liquidity[i] == 1:
-                        active_liq.append((i, liquidity_level[i] + pip_range_i))
-                    else:
-                        active_liq.append((i, liquidity_level[i] - pip_range_i))
-
-                for liq_info in active_liq.copy():
-                    liq_idx, threshold = liq_info
-                    if i <= liq_idx:
-                        continue
-                    if liquidity[liq_idx] == 1 and ohlc_high[i] >= threshold:
-                        liquidity_swept[liq_idx] = i
-                        active_liq.remove(liq_info)
-                    elif liquidity[liq_idx] == -1 and ohlc_low[i] <= threshold:
-                        liquidity_swept[liq_idx] = i
-                        active_liq.remove(liq_info)
+                    active_liq.append((g_start, avg - pip_range_bar, -1))
 
             liq_series = pd.Series(liquidity, name="Liquidity")
             level_series = pd.Series(liquidity_level, name="Level")
