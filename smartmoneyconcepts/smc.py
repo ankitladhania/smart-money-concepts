@@ -623,16 +623,20 @@ class smc:
             # Update existing bullish OB
             for idx in active_bullish.copy():
                 if breaker[idx]:
-                    if _high[close_index] > top_arr[idx]:
-                        # Reset this OB
-                        ob[idx] = 0
-                        top_arr[idx] = 0.0
-                        bottom_arr[idx] = 0.0
-                        obVolume[idx] = 0.0
-                        lowVolume[idx] = 0.0
-                        highVolume[idx] = 0.0
-                        mitigated_index[idx] = 0
-                        percentage[idx] = 0.0
+                    if not causal:
+                        if _high[close_index] > top_arr[idx]:
+                            # Reset this OB
+                            ob[idx] = 0
+                            top_arr[idx] = 0.0
+                            bottom_arr[idx] = 0.0
+                            obVolume[idx] = 0.0
+                            lowVolume[idx] = 0.0
+                            highVolume[idx] = 0.0
+                            mitigated_index[idx] = 0
+                            percentage[idx] = 0.0
+                            active_bullish.remove(idx)
+                    else:
+                        # Causal: don't erase historical OB, just stop tracking
                         active_bullish.remove(idx)
                 else:
                     if ((not close_mitigation and _low[close_index] < bottom_arr[idx])
@@ -687,15 +691,19 @@ class smc:
             # Update existing bearish OB
             for idx in active_bearish.copy():
                 if breaker[idx]:
-                    if _low[close_index] < bottom_arr[idx]:
-                        ob[idx] = 0
-                        top_arr[idx] = 0.0
-                        bottom_arr[idx] = 0.0
-                        obVolume[idx] = 0.0
-                        lowVolume[idx] = 0.0
-                        highVolume[idx] = 0.0
-                        mitigated_index[idx] = 0
-                        percentage[idx] = 0.0
+                    if not causal:
+                        if _low[close_index] < bottom_arr[idx]:
+                            ob[idx] = 0
+                            top_arr[idx] = 0.0
+                            bottom_arr[idx] = 0.0
+                            obVolume[idx] = 0.0
+                            lowVolume[idx] = 0.0
+                            highVolume[idx] = 0.0
+                            mitigated_index[idx] = 0
+                            percentage[idx] = 0.0
+                            active_bearish.remove(idx)
+                    else:
+                        # Causal: don't erase historical OB, just stop tracking
                         active_bearish.remove(idx)
                 else:
                     if ((not close_mitigation and _high[close_index] > top_arr[idx])
@@ -791,81 +799,85 @@ class smc:
         swing_highs_lows_arg = swing_highs_lows
 
         if causal:
-            # Validate
             if not swing_highs_lows_arg.attrs.get('causal', False):
                 raise ValueError("liquidity with causal=True requires causal swing_highs_lows input")
 
             shl = swing_highs_lows_arg.copy()
             n = len(ohlc)
-            pip_range = (ohlc["high"].max() - ohlc["low"].min()) * range_percent
             ohlc_high = ohlc["high"].values
             ohlc_low = ohlc["low"].values
             shl_HL = shl["HighLow"].values.copy()
             shl_Level = shl["Level"].values.copy()
+
+            # Running max/min for causal pip_range
+            running_high = np.maximum.accumulate(ohlc_high)
+            running_low = np.minimum.accumulate(ohlc_low)
 
             liquidity = np.full(n, np.nan, dtype=np.float32)
             liquidity_level = np.full(n, np.nan, dtype=np.float32)
             liquidity_end = np.full(n, np.nan, dtype=np.float32)
             liquidity_swept = np.full(n, np.nan, dtype=np.float32)
 
-            # Process bullish liquidity (no forward sweep bounding)
-            bull_indices = np.nonzero(shl_HL == 1)[0]
-            for i in bull_indices:
-                if shl_HL[i] != 1:
-                    continue
-                high_level = shl_Level[i]
-                range_low = high_level - pip_range
-                range_high = high_level + pip_range
-                group_levels = [high_level]
-                group_end = i
+            # Causal grouping: process swings in temporal order
+            # pending_bull: list of [start_idx, [levels], last_idx] - groups waiting for more members
+            pending_bull = []
+            pending_bear = []
 
-                for j in bull_indices:
-                    if j <= i:
-                        continue
-                    if shl_HL[j] == 1 and (range_low <= shl_Level[j] <= range_high):
-                        group_levels.append(shl_Level[j])
-                        group_end = j
-                        shl_HL[j] = 0
+            swing_indices = np.nonzero(~np.isnan(shl_HL))[0]
+            for i in swing_indices:
+                pip_range_i = (running_high[i] - running_low[i]) * range_percent
 
-                if len(group_levels) > 1:
-                    avg_level = sum(group_levels) / len(group_levels)
-                    liquidity[i] = 1
-                    liquidity_level[i] = avg_level
-                    liquidity_end[i] = group_end
+                if shl_HL[i] == 1:
+                    # Try to join an existing pending bullish group
+                    joined = False
+                    for g in pending_bull:
+                        g_start, g_levels, g_last = g
+                        avg = sum(g_levels) / len(g_levels)
+                        if abs(shl_Level[i] - avg) <= pip_range_i:
+                            g_levels.append(shl_Level[i])
+                            g[2] = i  # update last index
+                            joined = True
+                            break
+                    if not joined:
+                        pending_bull.append([i, [shl_Level[i]], i])
 
-            # Process bearish liquidity (no forward sweep bounding)
-            bear_indices = np.nonzero(shl_HL == -1)[0]
-            for i in bear_indices:
-                if shl_HL[i] != -1:
-                    continue
-                low_level = shl_Level[i]
-                range_low = low_level - pip_range
-                range_high = low_level + pip_range
-                group_levels = [low_level]
-                group_end = i
+                elif shl_HL[i] == -1:
+                    joined = False
+                    for g in pending_bear:
+                        g_start, g_levels, g_last = g
+                        avg = sum(g_levels) / len(g_levels)
+                        if abs(shl_Level[i] - avg) <= pip_range_i:
+                            g_levels.append(shl_Level[i])
+                            g[2] = i
+                            joined = True
+                            break
+                    if not joined:
+                        pending_bear.append([i, [shl_Level[i]], i])
 
-                for j in bear_indices:
-                    if j <= i:
-                        continue
-                    if shl_HL[j] == -1 and (range_low <= shl_Level[j] <= range_high):
-                        group_levels.append(shl_Level[j])
-                        group_end = j
-                        shl_HL[j] = 0
+            # Emit confirmed groups (2+ members)
+            for g in pending_bull:
+                g_start, g_levels, g_last = g
+                if len(g_levels) > 1:
+                    liquidity[g_start] = 1
+                    liquidity_level[g_start] = sum(g_levels) / len(g_levels)
+                    liquidity_end[g_start] = g_last
 
-                if len(group_levels) > 1:
-                    avg_level = sum(group_levels) / len(group_levels)
-                    liquidity[i] = -1
-                    liquidity_level[i] = avg_level
-                    liquidity_end[i] = group_end
+            for g in pending_bear:
+                g_start, g_levels, g_last = g
+                if len(g_levels) > 1:
+                    liquidity[g_start] = -1
+                    liquidity_level[g_start] = sum(g_levels) / len(g_levels)
+                    liquidity_end[g_start] = g_last
 
-            # Bar-by-bar sweep tracking
+            # Bar-by-bar sweep tracking (also uses causal pip_range)
             active_liq = []
             for i in range(n):
                 if not np.isnan(liquidity[i]):
+                    pip_range_i = (running_high[i] - running_low[i]) * range_percent
                     if liquidity[i] == 1:
-                        active_liq.append((i, liquidity_level[i] + pip_range))
+                        active_liq.append((i, liquidity_level[i] + pip_range_i))
                     else:
-                        active_liq.append((i, liquidity_level[i] - pip_range))
+                        active_liq.append((i, liquidity_level[i] - pip_range_i))
 
                 for liq_info in active_liq.copy():
                     liq_idx, threshold = liq_info
