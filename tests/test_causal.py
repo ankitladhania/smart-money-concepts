@@ -164,5 +164,57 @@ class TestFVGCausal(unittest.TestCase):
         pd.testing.assert_frame_equal(result, expected, check_dtype=False)
 
 
+class TestBosChochCausal(unittest.TestCase):
+
+    def test_causal_metadata_set(self):
+        swings = smc.swing_highs_lows(df, swing_length=5, causal=True)
+        result = smc.bos_choch(df, swings, causal=True)
+        self.assertTrue(result.attrs.get("causal", False))
+
+    def test_rejects_non_causal_swings(self):
+        """Must raise ValueError when causal=True but swings are non-causal."""
+        swings = smc.swing_highs_lows(df, swing_length=5, causal=False)
+        with self.assertRaises(ValueError):
+            smc.bos_choch(df, swings, causal=True)
+
+    def test_no_lookahead_via_truncation(self):
+        """BOS/CHOCH at bar i must not change when future bars removed."""
+        cutoff = len(df) - 200
+
+        full_swings = smc.swing_highs_lows(df, swing_length=5, causal=True)
+        full = smc.bos_choch(df, full_swings, causal=True)
+
+        trunc_swings = smc.swing_highs_lows(df.iloc[:cutoff], swing_length=5, causal=True)
+        trunc = smc.bos_choch(df.iloc[:cutoff], trunc_swings, causal=True)
+
+        confirmed = cutoff - 50  # generous margin
+        for col in ["BOS", "CHOCH"]:
+            full_vals = full[col].iloc[:confirmed]
+            trunc_vals = trunc[col].iloc[:confirmed]
+            trunc_non_nan = trunc_vals.dropna()
+            for idx in trunc_non_nan.index:
+                self.assertEqual(
+                    trunc_non_nan.loc[idx], full_vals.loc[idx],
+                    f"{col} mismatch at {idx}",
+                )
+
+    def test_broken_index_causal(self):
+        """BrokenIndex must be after the BOS/CHOCH bar, or NaN if not yet broken."""
+        swings = smc.swing_highs_lows(df, swing_length=5, causal=True)
+        result = smc.bos_choch(df, swings, causal=True)
+        for col in ["BOS", "CHOCH"]:
+            events = result[result[col].notna()]
+            for idx in events.index:
+                broken = result["BrokenIndex"].iloc[idx]
+                if not np.isnan(broken):
+                    self.assertGreater(int(broken), idx)
+
+    def test_existing_non_causal_unchanged(self):
+        swings = smc.swing_highs_lows(df, swing_length=5, causal=False)
+        result = smc.bos_choch(df, swings, causal=False)
+        expected = pd.read_csv(os.path.join(TEST_DATA_DIR, "bos_choch_result_data.csv"))
+        pd.testing.assert_frame_equal(result, expected, check_dtype=False)
+
+
 if __name__ == "__main__":
     unittest.main()
