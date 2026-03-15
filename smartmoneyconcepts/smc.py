@@ -1292,9 +1292,15 @@ class smc:
                 )
 
         # shift the arrays by 1
-        current_retracement = np.roll(current_retracement, 1)
-        deepest_retracement = np.roll(deepest_retracement, 1)
-        direction = np.roll(direction, 1)
+        if causal:
+            # Non-wrapping shift: insert 0 at start, drop last element
+            current_retracement = np.concatenate([[0], current_retracement[:-1]])
+            deepest_retracement = np.concatenate([[0], deepest_retracement[:-1]])
+            direction = np.concatenate([[0], direction[:-1]])
+        else:
+            current_retracement = np.roll(current_retracement, 1)
+            deepest_retracement = np.roll(deepest_retracement, 1)
+            direction = np.roll(direction, 1)
 
         # remove the first 3 retracements as they get calculated incorrectly due to not enough data
         remove_first_count = 0
