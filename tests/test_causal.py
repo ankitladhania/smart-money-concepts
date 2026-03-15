@@ -245,5 +245,50 @@ class TestOBCausal(unittest.TestCase):
         pd.testing.assert_frame_equal(result, expected, check_dtype=False)
 
 
+class TestLiquidityCausal(unittest.TestCase):
+
+    def test_causal_metadata_set(self):
+        swings = smc.swing_highs_lows(df, swing_length=5, causal=True)
+        result = smc.liquidity(df, swings, causal=True)
+        self.assertTrue(result.attrs.get("causal", False))
+
+    def test_rejects_non_causal_swings(self):
+        swings = smc.swing_highs_lows(df, swing_length=5, causal=False)
+        with self.assertRaises(ValueError):
+            smc.liquidity(df, swings, causal=True)
+
+    def test_swept_causal(self):
+        """Swept index must be after the liquidity bar, or NaN/0 if not swept."""
+        swings = smc.swing_highs_lows(df, swing_length=5, causal=True)
+        result = smc.liquidity(df, swings, causal=True)
+        liqs = result[result["Liquidity"].notna()]
+        for idx in liqs.index:
+            swept = result["Swept"].iloc[idx]
+            if not np.isnan(swept) and swept != 0:
+                self.assertGreater(int(swept), idx)
+
+    def test_no_lookahead_via_truncation(self):
+        """Liquidity grouping must not change when future bars removed."""
+        cutoff = len(df) - 200
+        full_swings = smc.swing_highs_lows(df, swing_length=5, causal=True)
+        full = smc.liquidity(df, full_swings, causal=True)
+        trunc_swings = smc.swing_highs_lows(df.iloc[:cutoff], swing_length=5, causal=True)
+        trunc = smc.liquidity(df.iloc[:cutoff], trunc_swings, causal=True)
+
+        confirmed = cutoff - 50
+        trunc_liqs = trunc["Liquidity"].iloc[:confirmed].dropna()
+        for idx in trunc_liqs.index:
+            self.assertEqual(
+                trunc_liqs.loc[idx], full["Liquidity"].iloc[idx],
+                f"Liquidity mismatch at {idx}",
+            )
+
+    def test_existing_non_causal_unchanged(self):
+        swings = smc.swing_highs_lows(df, swing_length=5, causal=False)
+        result = smc.liquidity(df, swings, causal=False)
+        expected = pd.read_csv(os.path.join(TEST_DATA_DIR, "liquidity_result_data.csv"))
+        pd.testing.assert_frame_equal(result, expected, check_dtype=False)
+
+
 if __name__ == "__main__":
     unittest.main()
