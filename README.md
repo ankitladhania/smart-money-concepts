@@ -27,12 +27,40 @@ Prepare data to use with smc:
 
 smc expects properly formated ohlc DataFrame, with column names in lowercase: ["open", "high", "low", "close"] and ["volume"] for indicators that expect ohlcv input.
 
+## Causal Mode
+
+All indicators that previously used lookahead (future data) now support a `causal=True` parameter. When enabled, outputs at bar N depend only on data from bars 0 through N — no future data leaks into past features. This is essential for ML/backtesting where lookahead bias must be eliminated.
+
+```python
+# Causal swing detection (lookback-only rolling windows)
+swings = smc.swing_highs_lows(ohlc, swing_length=5, causal=True)
+
+# All dependent functions accept causal=True and validate their inputs
+fvg = smc.fvg(ohlc, causal=True)
+bos_choch = smc.bos_choch(ohlc, swings, causal=True)
+ob = smc.ob(ohlc, swings, causal=True)
+liquidity = smc.liquidity(ohlc, swings, causal=True)
+retracements = smc.retracements(ohlc, swings, causal=True)
+```
+
+**Key differences in causal mode:**
+- `swing_highs_lows`: Last `swing_length` bars are NaN (unconfirmed). No synthetic endpoint.
+- `fvg`: Last bar is NaN. Bar-by-bar mitigation tracking.
+- `bos_choch`: Unbroken patterns kept with `BrokenIndex=NaN` (instead of removed).
+- `ob`: Historical OBs are never erased by future price action.
+- `liquidity`: Label placed at the confirmation bar (when 2nd swing joins group). `End` points back to the group start. Running pip_range instead of global.
+- `retracements`: Non-wrapping shift for direction cleanup.
+- All causal outputs set `result.attrs["causal"] = True` as metadata.
+- Dependent functions (`bos_choch`, `ob`, `liquidity`, `retracements`) raise `ValueError` if called with `causal=True` but given non-causal swing inputs.
+
+Default `causal=False` preserves all existing behavior exactly.
+
 ## Indicators
 
 ### Fair Value Gap (FVG)
 
 ```python
-smc.fvg(ohlc, join_consecutive=False)
+smc.fvg(ohlc, join_consecutive=False, causal=False)
 ```
 
 A fair value gap is when the previous high is lower than the next low if the current candle is bullish.
@@ -40,6 +68,7 @@ Or when the previous low is higher than the next high if the current candle is b
 
 parameters:<br>
 join_consecutive: bool - if there are multiple FVG in a row then they will be merged into one using the highest top and the lowest bottom<br>
+causal: bool - if True then only past/present data is used (no lookahead)<br>
 
 returns:<br>
 FVG = 1 if bullish fair value gap, -1 if bearish fair value gap<br>
@@ -50,7 +79,7 @@ MitigatedIndex = the index of the candle that mitigated the fair value gap<br>
 ### Swing Highs and Lows
 
 ```python
-smc.swing_highs_lows(ohlc, swing_length = 50)
+smc.swing_highs_lows(ohlc, swing_length=50, causal=False)
 ```
 
 A swing high is when the current high is the highest high out of the swing_length amount of candles before and after.
@@ -58,6 +87,7 @@ A swing low is when the current low is the lowest low out of the swing_length am
 
 parameters:<br>
 swing_length: int - the amount of candles to look back and forward to determine the swing high or low<br>
+causal: bool - if True, uses lookback-only rolling windows. Last swing_length bars will be NaN (unconfirmed).<br>
 
 returns:<br>
 HighLow = 1 if swing high, -1 if swing low<br>
@@ -66,7 +96,7 @@ Level = the level of the swing high or low<br>
 ### Break of Structure (BOS) & Change of Character (CHoCH)
 
 ```python
-smc.bos_choch(ohlc, swing_highs_lows, close_break = True)
+smc.bos_choch(ohlc, swing_highs_lows, close_break=True, causal=False)
 ```
 
 These are both indications of market structure changing
@@ -74,24 +104,26 @@ These are both indications of market structure changing
 parameters:<br>
 swing_highs_lows: DataFrame - provide the dataframe from the swing_highs_lows function<br>
 close_break: bool - if True then the break of structure will be mitigated based on the close of the candle otherwise it will be the high/low.<br>
+causal: bool - if True, uses bar-by-bar break validation. Requires causal swing inputs.<br>
 
 returns:<br>
 BOS = 1 if bullish break of structure, -1 if bearish break of structure<br>
 CHOCH = 1 if bullish change of character, -1 if bearish change of character<br>
 Level = the level of the break of structure or change of character<br>
-BrokenIndex = the index of the candle that broke the level<br>
+BrokenIndex = the index of the candle that broke the level (NaN if not yet broken in causal mode)<br>
 
 ### Order Blocks (OB)
 
 ```python
-smc.ob(ohlc, swing_highs_lows, close_mitigation = False)
+smc.ob(ohlc, swing_highs_lows, close_mitigation=False, causal=False)
 ```
 
 This method detects order blocks when there is a high amount of market orders exist on a price range.
 
 parameters:<br>
 swing_highs_lows: DataFrame - provide the dataframe from the swing_highs_lows function<br>
-close_mitigation: bool - if True then the order block will be mitigated based on the close of the candle otherwise it will be the high/low.
+close_mitigation: bool - if True then the order block will be mitigated based on the close of the candle otherwise it will be the high/low.<br>
+causal: bool - if True, historical OBs are never retroactively erased. Requires causal swing inputs.<br>
 
 returns:<br>
 OB = 1 if bullish order block, -1 if bearish order block<br>
@@ -104,26 +136,27 @@ Percentage = strength of order block (min(highVolume, lowVolume)/max(highVolume,
 ### Liquidity
 
 ```python
-smc.liquidity(ohlc, swing_highs_lows, range_percent = 0.01)
+smc.liquidity(ohlc, swing_highs_lows, range_percent=0.01, causal=False)
 ```
 
-Liquidity is when there are multiply highs within a small range of each other.
-or multiply lows within a small range of each other.
+Liquidity is when there are multiple highs within a small range of each other,
+or multiple lows within a small range of each other.
 
 parameters:<br>
 swing_highs_lows: DataFrame - provide the dataframe from the swing_highs_lows function<br>
 range_percent: float - the percentage of the range to determine liquidity<br>
+causal: bool - if True, uses running pip_range and places labels at confirmation bar. Requires causal swing inputs.<br>
 
 returns:<br>
 Liquidity = 1 if bullish liquidity, -1 if bearish liquidity<br>
 Level = the level of the liquidity<br>
-End = the index of the last liquidity level<br>
+End = the index of the last liquidity level (in causal mode: points back to group start)<br>
 Swept = the index of the candle that swept the liquidity<br>
 
 ### Previous High And Low
 
 ```python
-smc.previous_high_low(ohlc, time_frame = "1D")
+smc.previous_high_low(ohlc, time_frame="1D")
 ```
 
 This method returns the previous high and low of the given time frame.
@@ -140,7 +173,7 @@ BrokenLow = 1 once price has broken the previous low of the timeframe, 0 otherwi
 ### Sessions
 
 ```python
-smc.sessions(ohlc, session, start_time, end_time, time_zone = "UTC")
+smc.sessions(ohlc, session, start_time, end_time, time_zone="UTC")
 ```
 
 This method returns which candles are within the session specified
@@ -159,13 +192,14 @@ Low = the lowest point of the session<br>
 ### Retracements
 
 ```python
-smc.retracements(ohlc, swing_highs_lows)
+smc.retracements(ohlc, swing_highs_lows, causal=False)
 ```
 
 This method returns the percentage of a retracement from the swing high or low
 
 parameters:<br>
 swing_highs_lows: DataFrame - provide the dataframe from the swing_highs_lows function<br>
+causal: bool - if True, uses non-wrapping shift. Requires causal swing inputs.<br>
 
 returns:<br>
 Direction = 1 if bullish retracement, -1 if bearish retracement<br>
