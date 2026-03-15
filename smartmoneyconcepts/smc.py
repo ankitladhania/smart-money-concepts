@@ -362,7 +362,7 @@ class smc:
 
     @classmethod
     def bos_choch(
-        cls, ohlc: DataFrame, swing_highs_lows: DataFrame, close_break: bool = True
+        cls, ohlc: DataFrame, swing_highs_lows: DataFrame, close_break: bool = True, causal: bool = False
     ) -> Series:
         """
         BOS - Break of Structure
@@ -379,6 +379,9 @@ class smc:
         Level = the level of the break of structure or change of character
         BrokenIndex = the index of the candle that broke the level
         """
+
+        if causal and not swing_highs_lows.attrs.get("causal", False):
+            raise ValueError("bos_choch with causal=True requires causal swing_highs_lows input")
 
         swing_highs_lows = swing_highs_lows.copy()
 
@@ -474,45 +477,91 @@ class smc:
 
                 last_positions.append(i)
 
-        broken = np.zeros(len(ohlc), dtype=np.int32)
-        for i in np.where(np.logical_or(bos != 0, choch != 0))[0]:
-            mask = np.zeros(len(ohlc), dtype=np.bool_)
-            # if the bos is 1 then check if the candles high has gone above the level
-            if bos[i] == 1 or choch[i] == 1:
-                mask = ohlc["close" if close_break else "high"][i + 2 :] > level[i]
-            # if the bos is -1 then check if the candles low has gone below the level
-            elif bos[i] == -1 or choch[i] == -1:
-                mask = ohlc["close" if close_break else "low"][i + 2 :] < level[i]
-            if np.any(mask):
-                j = np.argmax(mask) + i + 2
-                broken[i] = j
-                # if there are any unbroken bos or choch that started before this one and ended after this one then remove them
-                for k in np.where(np.logical_or(bos != 0, choch != 0))[0]:
-                    if k < i and broken[k] >= j:
-                        bos[k] = 0
-                        choch[k] = 0
-                        level[k] = 0
+        if causal:
+            # Bar-by-bar break validation
+            active_patterns = []
+            for i in np.where(np.logical_or(bos != 0, choch != 0))[0]:
+                active_patterns.append(i)
 
-        # remove the ones that aren't broken
-        for i in np.where(
-            np.logical_and(np.logical_or(bos != 0, choch != 0), broken == 0)
-        )[0]:
-            bos[i] = 0
-            choch[i] = 0
-            level[i] = 0
+            broken = np.zeros(len(ohlc), dtype=np.int32)
+            for bar in range(len(ohlc)):
+                for i in active_patterns.copy():
+                    if bar <= i + 1:
+                        continue
+                    if bos[i] == 1 or choch[i] == 1:
+                        if ohlc["close" if close_break else "high"].iloc[bar] > level[i]:
+                            broken[i] = bar
+                            # Supersession: remove earlier patterns broken at same or later bar
+                            for k in active_patterns.copy():
+                                if k < i and broken[k] >= bar:
+                                    bos[k] = 0
+                                    choch[k] = 0
+                                    level[k] = 0
+                            active_patterns.remove(i)
+                    elif bos[i] == -1 or choch[i] == -1:
+                        if ohlc["close" if close_break else "low"].iloc[bar] < level[i]:
+                            broken[i] = bar
+                            for k in active_patterns.copy():
+                                if k < i and broken[k] >= bar:
+                                    bos[k] = 0
+                                    choch[k] = 0
+                                    level[k] = 0
+                            active_patterns.remove(i)
 
-        # replace all the 0s with np.nan
-        bos = np.where(bos != 0, bos, np.nan)
-        choch = np.where(choch != 0, choch, np.nan)
-        level = np.where(level != 0, level, np.nan)
-        broken = np.where(broken != 0, broken, np.nan)
+            # Do NOT remove unbroken patterns (they stay with BrokenIndex=NaN)
+            bos = np.where(bos != 0, bos, np.nan)
+            choch = np.where(choch != 0, choch, np.nan)
+            level = np.where(level != 0, level, np.nan)
+            broken = np.where(broken != 0, broken, np.nan)
 
-        bos = pd.Series(bos, name="BOS")
-        choch = pd.Series(choch, name="CHOCH")
-        level = pd.Series(level, name="Level")
-        broken = pd.Series(broken, name="BrokenIndex")
+            bos = pd.Series(bos, name="BOS")
+            choch = pd.Series(choch, name="CHOCH")
+            level = pd.Series(level, name="Level")
+            broken = pd.Series(broken, name="BrokenIndex")
 
-        return pd.concat([bos, choch, level, broken], axis=1)
+            result = pd.concat([bos, choch, level, broken], axis=1)
+            result.attrs["causal"] = True
+            return result
+        else:
+            broken = np.zeros(len(ohlc), dtype=np.int32)
+            for i in np.where(np.logical_or(bos != 0, choch != 0))[0]:
+                mask = np.zeros(len(ohlc), dtype=np.bool_)
+                # if the bos is 1 then check if the candles high has gone above the level
+                if bos[i] == 1 or choch[i] == 1:
+                    mask = ohlc["close" if close_break else "high"][i + 2 :] > level[i]
+                # if the bos is -1 then check if the candles low has gone below the level
+                elif bos[i] == -1 or choch[i] == -1:
+                    mask = ohlc["close" if close_break else "low"][i + 2 :] < level[i]
+                if np.any(mask):
+                    j = np.argmax(mask) + i + 2
+                    broken[i] = j
+                    # if there are any unbroken bos or choch that started before this one and ended after this one then remove them
+                    for k in np.where(np.logical_or(bos != 0, choch != 0))[0]:
+                        if k < i and broken[k] >= j:
+                            bos[k] = 0
+                            choch[k] = 0
+                            level[k] = 0
+
+            # remove the ones that aren't broken
+            for i in np.where(
+                np.logical_and(np.logical_or(bos != 0, choch != 0), broken == 0)
+            )[0]:
+                bos[i] = 0
+                choch[i] = 0
+                level[i] = 0
+
+            # replace all the 0s with np.nan
+            bos = np.where(bos != 0, bos, np.nan)
+            choch = np.where(choch != 0, choch, np.nan)
+            level = np.where(level != 0, level, np.nan)
+            broken = np.where(broken != 0, broken, np.nan)
+
+            bos = pd.Series(bos, name="BOS")
+            choch = pd.Series(choch, name="CHOCH")
+            level = pd.Series(level, name="Level")
+            broken = pd.Series(broken, name="BrokenIndex")
+
+            return pd.concat([bos, choch, level, broken], axis=1)
 
     @classmethod
     def ob(
