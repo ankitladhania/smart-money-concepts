@@ -302,39 +302,35 @@ class smc:
             # Check: high[p] == rolling_max[j] where j = p + half
             swing_highs_lows = np.full(n, np.nan)
 
+            # Causal detection + incremental dedup at confirmation time
+            confirmed = []  # list of (bar_index, swing_type) for kept swings
+
             for j in range(full_window, n):
                 p = j - half
                 if high[p] == rolling_max[j]:
-                    swing_highs_lows[p] = 1
+                    new_type = 1
                 elif low[p] == rolling_min[j]:
-                    swing_highs_lows[p] = -1
+                    new_type = -1
+                else:
+                    continue
 
-            # Last half bars are NaN (unconfirmed) - already NaN by default
-
-            # Causal dedup: left-to-right, only compare against the last kept swing
-            positions = np.where(~np.isnan(swing_highs_lows))[0]
-            if len(positions) >= 2:
-                keep = [positions[0]]
-                for idx in positions[1:]:
-                    prev_idx = keep[-1]
-                    prev_type = swing_highs_lows[prev_idx]
-                    curr_type = swing_highs_lows[idx]
-                    if curr_type == prev_type:
-                        # Same type: keep the more extreme one
-                        if curr_type == 1:  # consecutive highs
-                            if ohlc["high"].iloc[idx] >= ohlc["high"].iloc[prev_idx]:
-                                swing_highs_lows[prev_idx] = np.nan
-                                keep[-1] = idx
-                            else:
-                                swing_highs_lows[idx] = np.nan
-                        else:  # consecutive lows
-                            if ohlc["low"].iloc[idx] <= ohlc["low"].iloc[prev_idx]:
-                                swing_highs_lows[prev_idx] = np.nan
-                                keep[-1] = idx
-                            else:
-                                swing_highs_lows[idx] = np.nan
+                # Dedup against the last confirmed swing
+                if confirmed and confirmed[-1][1] == new_type:
+                    prev_p = confirmed[-1][0]
+                    if new_type == 1 and high[p] >= high[prev_p]:
+                        swing_highs_lows[prev_p] = np.nan
+                        confirmed[-1] = (p, new_type)
+                        swing_highs_lows[p] = new_type
+                    elif new_type == -1 and low[p] <= low[prev_p]:
+                        swing_highs_lows[prev_p] = np.nan
+                        confirmed[-1] = (p, new_type)
+                        swing_highs_lows[p] = new_type
                     else:
-                        keep.append(idx)
+                        # Discard new swing (prev is more extreme)
+                        pass
+                else:
+                    confirmed.append((p, new_type))
+                    swing_highs_lows[p] = new_type
 
             # Synthetic start point only (no endpoint in causal mode)
             positions = np.where(~np.isnan(swing_highs_lows))[0]
