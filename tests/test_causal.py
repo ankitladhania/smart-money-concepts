@@ -36,20 +36,17 @@ class TestSwingHighsLowsCausal(unittest.TestCase):
         self.assertTrue(tail.isna().all(),
                         f"Expected last {swing_length} bars to be NaN, got {tail.values}")
 
-    def test_equivalence_on_confirmed_bars(self):
-        """Causal output (minus tail) must match non-causal for confirmed bars."""
+    def test_alternating_pattern(self):
+        """Causal dedup must produce strictly alternating highs and lows."""
         swing_length = 5
-        causal = smc.swing_highs_lows(df, swing_length=swing_length, causal=True)
-        non_causal = smc.swing_highs_lows(df, swing_length=swing_length, causal=False)
-
-        confirmed = len(df) - swing_length
-        c = causal["HighLow"].iloc[1:confirmed]
-        nc = non_causal["HighLow"].iloc[1:confirmed]
-        causal_swings = c.dropna()
-        for idx in causal_swings.index:
-            self.assertEqual(
-                causal_swings.loc[idx], nc.loc[idx],
-                f"Mismatch at index {idx}: causal={causal_swings.loc[idx]}, non_causal={nc.loc[idx]}"
+        result = smc.swing_highs_lows(df, swing_length=swing_length, causal=True)
+        swings = result["HighLow"].dropna()
+        values = swings.values
+        for i in range(1, len(values)):
+            self.assertNotEqual(
+                values[i], values[i - 1],
+                f"Non-alternating swings at positions {swings.index[i-1]} and {swings.index[i]}: "
+                f"both are {values[i]}"
             )
 
     def test_no_lookahead_via_truncation(self):

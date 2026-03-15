@@ -313,30 +313,30 @@ class smc:
 
             # Last half bars are NaN (unconfirmed) - already NaN by default
 
-            # Deduplication (same as non-causal)
-            while True:
-                positions = np.where(~np.isnan(swing_highs_lows))[0]
-                if len(positions) < 2:
-                    break
-                current = swing_highs_lows[positions[:-1]]
-                next_vals = swing_highs_lows[positions[1:]]
-                highs = ohlc["high"].iloc[positions[:-1]].values
-                lows = ohlc["low"].iloc[positions[:-1]].values
-                next_highs = ohlc["high"].iloc[positions[1:]].values
-                next_lows = ohlc["low"].iloc[positions[1:]].values
-                index_to_remove = np.zeros(len(positions), dtype=bool)
-
-                consecutive_highs = (current == 1) & (next_vals == 1)
-                index_to_remove[:-1] |= consecutive_highs & (highs < next_highs)
-                index_to_remove[1:] |= consecutive_highs & (highs >= next_highs)
-
-                consecutive_lows = (current == -1) & (next_vals == -1)
-                index_to_remove[:-1] |= consecutive_lows & (lows > next_lows)
-                index_to_remove[1:] |= consecutive_lows & (lows <= next_lows)
-
-                if not index_to_remove.any():
-                    break
-                swing_highs_lows[positions[index_to_remove]] = np.nan
+            # Causal dedup: left-to-right, only compare against the last kept swing
+            positions = np.where(~np.isnan(swing_highs_lows))[0]
+            if len(positions) >= 2:
+                keep = [positions[0]]
+                for idx in positions[1:]:
+                    prev_idx = keep[-1]
+                    prev_type = swing_highs_lows[prev_idx]
+                    curr_type = swing_highs_lows[idx]
+                    if curr_type == prev_type:
+                        # Same type: keep the more extreme one
+                        if curr_type == 1:  # consecutive highs
+                            if ohlc["high"].iloc[idx] >= ohlc["high"].iloc[prev_idx]:
+                                swing_highs_lows[prev_idx] = np.nan
+                                keep[-1] = idx
+                            else:
+                                swing_highs_lows[idx] = np.nan
+                        else:  # consecutive lows
+                            if ohlc["low"].iloc[idx] <= ohlc["low"].iloc[prev_idx]:
+                                swing_highs_lows[prev_idx] = np.nan
+                                keep[-1] = idx
+                            else:
+                                swing_highs_lows[idx] = np.nan
+                    else:
+                        keep.append(idx)
 
             # Synthetic start point only (no endpoint in causal mode)
             positions = np.where(~np.isnan(swing_highs_lows))[0]
