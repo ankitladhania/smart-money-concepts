@@ -1198,7 +1198,7 @@ class smc:
         return pd.concat([active, high, low], axis=1)
 
     @classmethod
-    def retracements(cls, ohlc: DataFrame, swing_highs_lows: DataFrame) -> Series:
+    def retracements(cls, ohlc: DataFrame, swing_highs_lows: DataFrame, causal: bool = False) -> Series:
         """
         Retracement
         This method returns the percentage of a retracement from the swing high or low
@@ -1211,6 +1211,9 @@ class smc:
         CurrentRetracement% = the current retracement percentage from the swing high or low
         DeepestRetracement% = the deepest retracement percentage from the swing high or low
         """
+
+        if causal and not swing_highs_lows.attrs.get("causal", False):
+            raise ValueError("retracements with causal=True requires causal swing_highs_lows input")
 
         swing_highs_lows = swing_highs_lows.copy()
 
@@ -1282,4 +1285,7 @@ class smc:
         current_retracement = pd.Series(current_retracement, name="CurrentRetracement%")
         deepest_retracement = pd.Series(deepest_retracement, name="DeepestRetracement%")
 
-        return pd.concat([direction, current_retracement, deepest_retracement], axis=1)
+        result = pd.concat([direction, current_retracement, deepest_retracement], axis=1)
+        if causal:
+            result.attrs["causal"] = True
+        return result
