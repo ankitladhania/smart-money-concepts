@@ -350,6 +350,7 @@ class smc:
                 axis=1,
             )
             result.attrs["causal"] = True
+            result.attrs["half"] = half
             return result
 
     @classmethod
@@ -607,6 +608,7 @@ class smc:
         # Precompute swing indices (assumed sorted)
         swing_high_indices = np.flatnonzero(swing_hl == 1)
         swing_low_indices = np.flatnonzero(swing_hl == -1)
+        causal_half = swing_highs_lows.attrs.get("half", 0) if causal else 0
 
         # List to track active bullish order blocks
         active_bullish = []
@@ -636,9 +638,13 @@ class smc:
                         breaker[idx] = True
                         mitigated_index[idx] = close_index - 1
 
-            # Find last swing high index less than current candle (using binary search)
-            pos = np.searchsorted(swing_high_indices, close_index)
-            last_top_index = swing_high_indices[pos - 1] if pos > 0 else None
+            # Find last confirmed swing high index less than current candle
+            if causal_half > 0:
+                valid_high = swing_high_indices[swing_high_indices + causal_half <= close_index]
+            else:
+                valid_high = swing_high_indices
+            pos = np.searchsorted(valid_high, close_index)
+            last_top_index = valid_high[pos - 1] if pos > 0 else None
 
             if last_top_index is not None:
                 if _close[close_index] > _high[last_top_index] and not crossed[last_top_index]:
@@ -703,9 +709,13 @@ class smc:
                         breaker[idx] = True
                         mitigated_index[idx] = close_index
 
-            # Find last swing low index less than current candle
-            pos = np.searchsorted(swing_low_indices, close_index)
-            last_btm_index = swing_low_indices[pos - 1] if pos > 0 else None
+            # Find last confirmed swing low index less than current candle
+            if causal_half > 0:
+                valid_low = swing_low_indices[swing_low_indices + causal_half <= close_index]
+            else:
+                valid_low = swing_low_indices
+            pos = np.searchsorted(valid_low, close_index)
+            last_btm_index = valid_low[pos - 1] if pos > 0 else None
 
             if last_btm_index is not None:
                 if _close[close_index] < _low[last_btm_index] and not crossed[last_btm_index]:
