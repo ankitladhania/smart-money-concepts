@@ -290,5 +290,24 @@ class TestLiquidityCausal(unittest.TestCase):
         pd.testing.assert_frame_equal(result, expected, check_dtype=False)
 
 
+class TestRetracementsCausal(unittest.TestCase):
+
+    def test_causal_metadata_set(self):
+        swings = smc.swing_highs_lows(df, swing_length=5, causal=True)
+        result = smc.retracements(df, swings, causal=True)
+        self.assertTrue(result.attrs.get("causal", False))
+
+    def test_rejects_non_causal_swings(self):
+        swings = smc.swing_highs_lows(df, swing_length=5, causal=False)
+        with self.assertRaises(ValueError):
+            smc.retracements(df, swings, causal=True)
+
+    def test_existing_non_causal_unchanged(self):
+        swings = smc.swing_highs_lows(df, swing_length=5, causal=False)
+        result = smc.retracements(df, swings, causal=False)
+        expected = pd.read_csv(os.path.join(TEST_DATA_DIR, "retracements_result_data.csv"))
+        pd.testing.assert_frame_equal(result, expected, check_dtype=False)
+
+
 if __name__ == "__main__":
     unittest.main()
