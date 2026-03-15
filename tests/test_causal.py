@@ -254,7 +254,7 @@ class TestOBCausal(unittest.TestCase):
         for idx in obs.index:
             mit = result["MitigatedIndex"].iloc[idx]
             if not np.isnan(mit) and mit != 0:
-                self.assertGreater(int(mit), idx)
+                self.assertGreaterEqual(int(mit), idx)
 
     def test_existing_non_causal_unchanged(self):
         swings = smc.swing_highs_lows(df, swing_length=5, causal=False)

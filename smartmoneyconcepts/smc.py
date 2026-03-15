@@ -669,18 +669,21 @@ class smc:
                                 obTop = _high[candidate_index]
                                 obIndex = candidate_index
                     # Set bullish OB values
-                    ob[obIndex] = 1
-                    top_arr[obIndex] = obTop
-                    bottom_arr[obIndex] = obBtm
+                    # When causal, store at close_index (crossing bar) to avoid
+                    # retroactive writes to past bars.
+                    store_idx = close_index if causal else obIndex
+                    ob[store_idx] = 1
+                    top_arr[store_idx] = obTop
+                    bottom_arr[store_idx] = obBtm
                     vol_cur = _volume[close_index]
                     vol_prev1 = _volume[close_index - 1] if close_index >= 1 else 0.0
                     vol_prev2 = _volume[close_index - 2] if close_index >= 2 else 0.0
-                    obVolume[obIndex] = vol_cur + vol_prev1 + vol_prev2
-                    lowVolume[obIndex] = vol_prev2
-                    highVolume[obIndex] = vol_cur + vol_prev1
-                    max_vol = max(highVolume[obIndex], lowVolume[obIndex])
-                    percentage[obIndex] = (min(highVolume[obIndex], lowVolume[obIndex]) / max_vol * 100.0) if max_vol != 0 else 100.0
-                    active_bullish.append(obIndex)
+                    obVolume[store_idx] = vol_cur + vol_prev1 + vol_prev2
+                    lowVolume[store_idx] = vol_prev2
+                    highVolume[store_idx] = vol_cur + vol_prev1
+                    max_vol = max(highVolume[store_idx], lowVolume[store_idx])
+                    percentage[store_idx] = (min(highVolume[store_idx], lowVolume[store_idx]) / max_vol * 100.0) if max_vol != 0 else 100.0
+                    active_bullish.append(store_idx)
 
         # List to track active bearish order blocks
         active_bearish = []
@@ -736,18 +739,19 @@ class smc:
                                 obTop = _high[candidate_index]
                                 obBtm = _low[candidate_index]
                                 obIndex = candidate_index
-                    ob[obIndex] = -1
-                    top_arr[obIndex] = obTop
-                    bottom_arr[obIndex] = obBtm
+                    store_idx = close_index if causal else obIndex
+                    ob[store_idx] = -1
+                    top_arr[store_idx] = obTop
+                    bottom_arr[store_idx] = obBtm
                     vol_cur = _volume[close_index]
                     vol_prev1 = _volume[close_index - 1] if close_index >= 1 else 0.0
                     vol_prev2 = _volume[close_index - 2] if close_index >= 2 else 0.0
-                    obVolume[obIndex] = vol_cur + vol_prev1 + vol_prev2
-                    lowVolume[obIndex] = vol_cur + vol_prev1
-                    highVolume[obIndex] = vol_prev2
-                    max_vol = max(highVolume[obIndex], lowVolume[obIndex])
-                    percentage[obIndex] = (min(highVolume[obIndex], lowVolume[obIndex]) / max_vol * 100.0) if max_vol != 0 else 100.0
-                    active_bearish.append(obIndex)
+                    obVolume[store_idx] = vol_cur + vol_prev1 + vol_prev2
+                    lowVolume[store_idx] = vol_cur + vol_prev1
+                    highVolume[store_idx] = vol_prev2
+                    max_vol = max(highVolume[store_idx], lowVolume[store_idx])
+                    percentage[store_idx] = (min(highVolume[store_idx], lowVolume[store_idx]) / max_vol * 100.0) if max_vol != 0 else 100.0
+                    active_bearish.append(store_idx)
 
         # Convert zeros to NaN where OB was not set
         ob = np.where(ob != 0, ob, np.nan)
