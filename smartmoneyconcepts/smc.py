@@ -53,7 +53,7 @@ class smc:
     __version__ = "0.0.26"
 
     @classmethod
-    def fvg(cls, ohlc: DataFrame, join_consecutive=False) -> Series:
+    def fvg(cls, ohlc: DataFrame, join_consecutive=False, causal: bool = False) -> Series:
         """
         FVG - Fair Value Gap
         A fair value gap is when the previous high is lower than the next low if the current candle is bullish.
@@ -68,6 +68,74 @@ class smc:
         Bottom = the bottom of the fair value gap
         MitigatedIndex = the index of the candle that mitigated the fair value gap
         """
+
+        if causal:
+            n = len(ohlc)
+            high = ohlc["high"].values
+            low = ohlc["low"].values
+            close = ohlc["close"].values
+            open_ = ohlc["open"].values
+
+            fvg = np.full(n, np.nan)
+            top = np.full(n, np.nan)
+            bottom = np.full(n, np.nan)
+
+            # At bar j (j >= 2), check if bars j-2, j-1, j form an FVG
+            # FVG is placed at j-1 (the middle candle)
+            for j in range(2, n):
+                if high[j-2] < low[j] and close[j-1] > open_[j-1]:
+                    # Bullish FVG
+                    fvg[j-1] = 1
+                    top[j-1] = low[j]
+                    bottom[j-1] = high[j-2]
+                elif low[j-2] > high[j] and close[j-1] < open_[j-1]:
+                    # Bearish FVG
+                    fvg[j-1] = -1
+                    top[j-1] = low[j-2]
+                    bottom[j-1] = high[j]
+
+            # Last bar is NaN (can't confirm yet) - already NaN
+
+            # join_consecutive (same logic as non-causal)
+            if join_consecutive:
+                for i in range(len(fvg) - 1):
+                    if fvg[i] == fvg[i + 1]:
+                        top[i + 1] = max(top[i], top[i + 1])
+                        bottom[i + 1] = min(bottom[i], bottom[i + 1])
+                        fvg[i] = top[i] = bottom[i] = np.nan
+
+            # Bar-by-bar mitigation tracking
+            mitigated_index = np.zeros(n, dtype=np.int32)
+            active_fvgs = []  # list of (fvg_idx, direction, top, bottom)
+
+            for j in range(n):
+                # Check if current bar mitigates any active FVGs
+                for fvg_info in active_fvgs.copy():
+                    fvg_idx, direction, ftop, fbottom = fvg_info
+                    if direction == 1 and low[j] <= ftop:
+                        mitigated_index[fvg_idx] = j
+                        active_fvgs.remove(fvg_info)
+                    elif direction == -1 and high[j] >= fbottom:
+                        mitigated_index[fvg_idx] = j
+                        active_fvgs.remove(fvg_info)
+
+                # If this bar has an FVG, add to active list
+                if not np.isnan(fvg[j]):
+                    active_fvgs.append((j, int(fvg[j]), top[j], bottom[j]))
+
+            mitigated_index = np.where(np.isnan(fvg), np.nan, mitigated_index)
+
+            result = pd.concat(
+                [
+                    pd.Series(fvg, name="FVG"),
+                    pd.Series(top, name="Top"),
+                    pd.Series(bottom, name="Bottom"),
+                    pd.Series(mitigated_index, name="MitigatedIndex"),
+                ],
+                axis=1,
+            )
+            result.attrs["causal"] = True
+            return result
 
         fvg = np.where(
             (
