@@ -770,7 +770,7 @@ class smc:
         return result
 
     @classmethod
-    def liquidity(cls, ohlc: DataFrame, swing_highs_lows: DataFrame, range_percent: float = 0.01) -> Series:
+    def liquidity(cls, ohlc: DataFrame, swing_highs_lows: DataFrame, range_percent: float = 0.01, causal: bool = False) -> Series:
         """
         Liquidity
         Liquidity is when there are multiple highs within a small range of each other,
@@ -787,10 +787,110 @@ class smc:
         Swept = the index of the candle that swept the liquidity
         """
 
+        # Keep a reference to the swing_highs_lows argument before shadowing
+        swing_highs_lows_arg = swing_highs_lows
+
+        if causal:
+            # Validate
+            if not swing_highs_lows_arg.attrs.get('causal', False):
+                raise ValueError("liquidity with causal=True requires causal swing_highs_lows input")
+
+            shl = swing_highs_lows_arg.copy()
+            n = len(ohlc)
+            pip_range = (ohlc["high"].max() - ohlc["low"].min()) * range_percent
+            ohlc_high = ohlc["high"].values
+            ohlc_low = ohlc["low"].values
+            shl_HL = shl["HighLow"].values.copy()
+            shl_Level = shl["Level"].values.copy()
+
+            liquidity = np.full(n, np.nan, dtype=np.float32)
+            liquidity_level = np.full(n, np.nan, dtype=np.float32)
+            liquidity_end = np.full(n, np.nan, dtype=np.float32)
+            liquidity_swept = np.full(n, np.nan, dtype=np.float32)
+
+            # Process bullish liquidity (no forward sweep bounding)
+            bull_indices = np.nonzero(shl_HL == 1)[0]
+            for i in bull_indices:
+                if shl_HL[i] != 1:
+                    continue
+                high_level = shl_Level[i]
+                range_low = high_level - pip_range
+                range_high = high_level + pip_range
+                group_levels = [high_level]
+                group_end = i
+
+                for j in bull_indices:
+                    if j <= i:
+                        continue
+                    if shl_HL[j] == 1 and (range_low <= shl_Level[j] <= range_high):
+                        group_levels.append(shl_Level[j])
+                        group_end = j
+                        shl_HL[j] = 0
+
+                if len(group_levels) > 1:
+                    avg_level = sum(group_levels) / len(group_levels)
+                    liquidity[i] = 1
+                    liquidity_level[i] = avg_level
+                    liquidity_end[i] = group_end
+
+            # Process bearish liquidity (no forward sweep bounding)
+            bear_indices = np.nonzero(shl_HL == -1)[0]
+            for i in bear_indices:
+                if shl_HL[i] != -1:
+                    continue
+                low_level = shl_Level[i]
+                range_low = low_level - pip_range
+                range_high = low_level + pip_range
+                group_levels = [low_level]
+                group_end = i
+
+                for j in bear_indices:
+                    if j <= i:
+                        continue
+                    if shl_HL[j] == -1 and (range_low <= shl_Level[j] <= range_high):
+                        group_levels.append(shl_Level[j])
+                        group_end = j
+                        shl_HL[j] = 0
+
+                if len(group_levels) > 1:
+                    avg_level = sum(group_levels) / len(group_levels)
+                    liquidity[i] = -1
+                    liquidity_level[i] = avg_level
+                    liquidity_end[i] = group_end
+
+            # Bar-by-bar sweep tracking
+            active_liq = []
+            for i in range(n):
+                if not np.isnan(liquidity[i]):
+                    if liquidity[i] == 1:
+                        active_liq.append((i, liquidity_level[i] + pip_range))
+                    else:
+                        active_liq.append((i, liquidity_level[i] - pip_range))
+
+                for liq_info in active_liq.copy():
+                    liq_idx, threshold = liq_info
+                    if i <= liq_idx:
+                        continue
+                    if liquidity[liq_idx] == 1 and ohlc_high[i] >= threshold:
+                        liquidity_swept[liq_idx] = i
+                        active_liq.remove(liq_info)
+                    elif liquidity[liq_idx] == -1 and ohlc_low[i] <= threshold:
+                        liquidity_swept[liq_idx] = i
+                        active_liq.remove(liq_info)
+
+            liq_series = pd.Series(liquidity, name="Liquidity")
+            level_series = pd.Series(liquidity_level, name="Level")
+            end_series = pd.Series(liquidity_end, name="End")
+            swept_series = pd.Series(liquidity_swept, name="Swept")
+
+            result = pd.concat([liq_series, level_series, end_series, swept_series], axis=1)
+            result.attrs["causal"] = True
+            return result
+
         # Work on a copy so the original is not modified.
         shl = swing_highs_lows.copy()
         n = len(ohlc)
-        
+
         # Calculate the pip range based on the overall high-low range.
         pip_range = (ohlc["high"].max() - ohlc["low"].min()) * range_percent
 
