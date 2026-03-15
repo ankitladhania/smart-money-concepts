@@ -36,18 +36,31 @@ class TestSwingHighsLowsCausal(unittest.TestCase):
         self.assertTrue(tail.isna().all(),
                         f"Expected last {swing_length} bars to be NaN, got {tail.values}")
 
-    def test_alternating_pattern(self):
-        """Causal dedup must produce strictly alternating highs and lows."""
+    def test_consecutive_same_type_more_extreme(self):
+        """When consecutive same-type swings appear, the later one must be more extreme."""
         swing_length = 5
         result = smc.swing_highs_lows(df, swing_length=swing_length, causal=True)
         swings = result["HighLow"].dropna()
+        high = df["high"].values if "high" in df.columns else df["High"].values
+        low = df["low"].values if "low" in df.columns else df["Low"].values
         values = swings.values
+        indices = swings.index
         for i in range(1, len(values)):
-            self.assertNotEqual(
-                values[i], values[i - 1],
-                f"Non-alternating swings at positions {swings.index[i-1]} and {swings.index[i]}: "
-                f"both are {values[i]}"
-            )
+            if values[i] == values[i - 1]:
+                prev_idx = indices[i - 1]
+                curr_idx = indices[i]
+                if values[i] == 1:
+                    self.assertGreaterEqual(
+                        high[curr_idx], high[prev_idx],
+                        f"Consecutive highs at {prev_idx} and {curr_idx}: "
+                        f"later high {high[curr_idx]} < prev {high[prev_idx]}"
+                    )
+                else:
+                    self.assertLessEqual(
+                        low[curr_idx], low[prev_idx],
+                        f"Consecutive lows at {prev_idx} and {curr_idx}: "
+                        f"later low {low[curr_idx]} > prev {low[prev_idx]}"
+                    )
 
     def test_no_lookahead_via_truncation(self):
         """Causal result at bar i must not change when future bars are removed."""

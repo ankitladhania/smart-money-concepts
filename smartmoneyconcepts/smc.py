@@ -314,15 +314,13 @@ class smc:
                 else:
                     continue
 
-                # Dedup against the last confirmed swing
+                # Dedup tracking (no retroactive writes to past bars)
                 if confirmed and confirmed[-1][1] == new_type:
                     prev_p = confirmed[-1][0]
                     if new_type == 1 and high[p] >= high[prev_p]:
-                        swing_highs_lows[prev_p] = np.nan
                         confirmed[-1] = (p, new_type)
                         swing_highs_lows[p] = new_type
                     elif new_type == -1 and low[p] <= low[prev_p]:
-                        swing_highs_lows[prev_p] = np.nan
                         confirmed[-1] = (p, new_type)
                         swing_highs_lows[p] = new_type
                     else:
