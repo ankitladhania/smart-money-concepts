@@ -569,6 +569,7 @@ class smc:
         ohlc: DataFrame,
         swing_highs_lows: DataFrame,
         close_mitigation: bool = False,
+        causal: bool = False,
     ) -> Series:
         """
         OB - Order Blocks
@@ -585,6 +586,11 @@ class smc:
         OBVolume = volume + 2 last volumes amounts
         Percentage = strength of order block (min(highVolume, lowVolume)/max(highVolume, lowVolume))
         """
+
+        if causal and not swing_highs_lows.attrs.get("causal", False):
+            raise ValueError(
+                "ob with causal=True requires causal swing_highs_lows input"
+            )
 
         ohlc_len = len(ohlc)
         _open = ohlc["open"].values
@@ -748,7 +754,7 @@ class smc:
         mitigated_index_series = pd.Series(mitigated_index, name="MitigatedIndex")
         percentage_series = pd.Series(percentage, name="Percentage")
 
-        return pd.concat(
+        result = pd.concat(
             [
                 ob_series,
                 top_series,
@@ -759,6 +765,9 @@ class smc:
             ],
             axis=1,
         )
+        if causal:
+            result.attrs["causal"] = True
+        return result
 
     @classmethod
     def liquidity(cls, ohlc: DataFrame, swing_highs_lows: DataFrame, range_percent: float = 0.01) -> Series:
