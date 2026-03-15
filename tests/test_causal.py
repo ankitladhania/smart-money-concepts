@@ -90,5 +90,79 @@ class TestSwingHighsLowsCausal(unittest.TestCase):
         pd.testing.assert_frame_equal(result, expected, check_dtype=False)
 
 
+class TestFVGCausal(unittest.TestCase):
+
+    def test_causal_metadata_set(self):
+        result = smc.fvg(df, causal=True)
+        self.assertTrue(result.attrs.get("causal", False))
+
+    def test_non_causal_metadata_not_set(self):
+        result = smc.fvg(df)
+        self.assertFalse(result.attrs.get("causal", False))
+
+    def test_tail_nan(self):
+        """Last 1 bar must be NaN (needs next bar to confirm)."""
+        result = smc.fvg(df, causal=True)
+        self.assertTrue(np.isnan(result["FVG"].iloc[-1]))
+
+    def test_equivalence_on_confirmed_bars(self):
+        """Causal FVG detection should match non-causal for confirmed bars."""
+        causal = smc.fvg(df, causal=True)
+        non_causal = smc.fvg(df, causal=False)
+        confirmed = len(df) - 1
+        c_fvg = causal["FVG"].iloc[:confirmed]
+        nc_fvg = non_causal["FVG"].iloc[:confirmed]
+        causal_fvgs = c_fvg.dropna()
+        for idx in causal_fvgs.index:
+            self.assertEqual(causal_fvgs.loc[idx], nc_fvg.loc[idx],
+                             f"FVG mismatch at {idx}")
+
+    def test_no_lookahead_via_truncation(self):
+        """Causal FVG at bar i must not change when future bars removed."""
+        n = len(df)
+        cutoff = n - 100
+
+        full = smc.fvg(df, causal=True)
+        trunc = smc.fvg(df.iloc[:cutoff], causal=True)
+
+        confirmed = cutoff - 1
+        pd.testing.assert_series_equal(
+            full["FVG"].iloc[:confirmed].reset_index(drop=True),
+            trunc["FVG"].iloc[:confirmed].reset_index(drop=True),
+            check_names=False,
+        )
+
+    def test_mitigation_causal(self):
+        """MitigatedIndex must not reference bars beyond what's available."""
+        result = smc.fvg(df, causal=True)
+        fvg_rows = result[result["FVG"].notna()]
+        for idx in fvg_rows.index:
+            mit_idx = result["MitigatedIndex"].iloc[idx]
+            if not np.isnan(mit_idx) and mit_idx != 0:
+                self.assertGreater(int(mit_idx), idx,
+                                   f"Mitigation at {mit_idx} must be after FVG at {idx}")
+
+    def test_mitigation_no_lookahead_via_truncation(self):
+        """Mitigation found in truncated data must match full data."""
+        n = len(df)
+        cutoff = n - 100
+
+        full = smc.fvg(df, causal=True)
+        trunc = smc.fvg(df.iloc[:cutoff], causal=True)
+
+        trunc_fvgs = trunc[trunc["FVG"].notna() & (trunc["MitigatedIndex"] > 0)]
+        for idx in trunc_fvgs.index:
+            self.assertEqual(
+                trunc["MitigatedIndex"].iloc[idx],
+                full["MitigatedIndex"].iloc[idx],
+                f"Mitigation mismatch at FVG index {idx}",
+            )
+
+    def test_existing_non_causal_unchanged(self):
+        result = smc.fvg(df, causal=False)
+        expected = pd.read_csv(os.path.join(TEST_DATA_DIR, "fvg_result_data.csv"))
+        pd.testing.assert_frame_equal(result, expected, check_dtype=False)
+
+
 if __name__ == "__main__":
     unittest.main()
