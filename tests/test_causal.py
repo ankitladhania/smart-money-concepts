@@ -309,5 +309,35 @@ class TestRetracementsCausal(unittest.TestCase):
         pd.testing.assert_frame_equal(result, expected, check_dtype=False)
 
 
+class TestCausalIntegration(unittest.TestCase):
+
+    def test_full_pipeline_causal(self):
+        """Run all functions in causal mode end-to-end."""
+        swings = smc.swing_highs_lows(df, swing_length=5, causal=True)
+        self.assertTrue(swings.attrs.get("causal"))
+
+        fvg = smc.fvg(df, causal=True)
+        self.assertTrue(fvg.attrs.get("causal"))
+
+        bos_choch = smc.bos_choch(df, swings, causal=True)
+        self.assertTrue(bos_choch.attrs.get("causal"))
+
+        ob = smc.ob(df, swings, causal=True)
+        self.assertTrue(ob.attrs.get("causal"))
+
+        liq = smc.liquidity(df, swings, causal=True)
+        self.assertTrue(liq.attrs.get("causal"))
+
+        ret = smc.retracements(df, swings, causal=True)
+        self.assertTrue(ret.attrs.get("causal"))
+
+    def test_all_existing_tests_still_pass(self):
+        """Sanity: default causal=False produces same results as before."""
+        swings = smc.swing_highs_lows(df, swing_length=5)
+        self.assertFalse(swings.attrs.get("causal", False))
+        bos = smc.bos_choch(df, swings)
+        self.assertFalse(bos.attrs.get("causal", False))
+
+
 if __name__ == "__main__":
     unittest.main()
