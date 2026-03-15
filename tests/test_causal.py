@@ -216,5 +216,34 @@ class TestBosChochCausal(unittest.TestCase):
         pd.testing.assert_frame_equal(result, expected, check_dtype=False)
 
 
+class TestOBCausal(unittest.TestCase):
+
+    def test_causal_metadata_set(self):
+        swings = smc.swing_highs_lows(df, swing_length=5, causal=True)
+        result = smc.ob(df, swings, causal=True)
+        self.assertTrue(result.attrs.get("causal", False))
+
+    def test_rejects_non_causal_swings(self):
+        swings = smc.swing_highs_lows(df, swing_length=5, causal=False)
+        with self.assertRaises(ValueError):
+            smc.ob(df, swings, causal=True)
+
+    def test_mitigation_index_causal(self):
+        """MitigatedIndex must be after the OB bar."""
+        swings = smc.swing_highs_lows(df, swing_length=5, causal=True)
+        result = smc.ob(df, swings, causal=True)
+        obs = result[result["OB"].notna()]
+        for idx in obs.index:
+            mit = result["MitigatedIndex"].iloc[idx]
+            if not np.isnan(mit) and mit != 0:
+                self.assertGreater(int(mit), idx)
+
+    def test_existing_non_causal_unchanged(self):
+        swings = smc.swing_highs_lows(df, swing_length=5, causal=False)
+        result = smc.ob(df, swings, causal=False)
+        expected = pd.read_csv(os.path.join(TEST_DATA_DIR, "ob_result_data.csv"))
+        pd.testing.assert_frame_equal(result, expected, check_dtype=False)
+
+
 if __name__ == "__main__":
     unittest.main()
