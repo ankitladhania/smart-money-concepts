@@ -81,20 +81,18 @@ class smc:
             bottom = np.full(n, np.nan)
 
             # At bar j (j >= 2), check if bars j-2, j-1, j form an FVG
-            # FVG is placed at j-1 (the middle candle)
+            # FVG is placed at j (the confirming bar)
             for j in range(2, n):
                 if high[j-2] < low[j] and close[j-1] > open_[j-1]:
                     # Bullish FVG
-                    fvg[j-1] = 1
-                    top[j-1] = low[j]
-                    bottom[j-1] = high[j-2]
+                    fvg[j] = 1
+                    top[j] = low[j]
+                    bottom[j] = high[j-2]
                 elif low[j-2] > high[j] and close[j-1] < open_[j-1]:
                     # Bearish FVG
-                    fvg[j-1] = -1
-                    top[j-1] = low[j-2]
-                    bottom[j-1] = high[j]
-
-            # Last bar is NaN (can't confirm yet) - already NaN
+                    fvg[j] = -1
+                    top[j] = low[j-2]
+                    bottom[j] = high[j]
 
             # join_consecutive (same logic as non-causal)
             if join_consecutive:

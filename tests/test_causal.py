@@ -102,17 +102,25 @@ class TestFVGCausal(unittest.TestCase):
         result = smc.fvg(df, causal=True)
         self.assertTrue(np.isnan(result["FVG"].iloc[-1]))
 
-    def test_equivalence_on_confirmed_bars(self):
-        """Causal FVG detection should match non-causal for confirmed bars."""
-        causal = smc.fvg(df, causal=True)
-        non_causal = smc.fvg(df, causal=False)
-        confirmed = len(df) - 1
-        c_fvg = causal["FVG"].iloc[:confirmed]
-        nc_fvg = non_causal["FVG"].iloc[:confirmed]
-        causal_fvgs = c_fvg.dropna()
-        for idx in causal_fvgs.index:
-            self.assertEqual(causal_fvgs.loc[idx], nc_fvg.loc[idx],
-                             f"FVG mismatch at {idx}")
+    def test_fvg_placed_at_confirming_bar(self):
+        """Causal FVG must be placed at bar j (confirming bar), not j-1."""
+        result = smc.fvg(df, causal=True)
+        fvg_indices = result.index[result["FVG"].notna()]
+        ohlc = df.rename(columns={"Open": "open", "High": "high", "Low": "low", "Close": "close"})
+        high = ohlc["high"].values
+        low = ohlc["low"].values
+        close = ohlc["close"].values
+        open_ = ohlc["open"].values
+        for idx in fvg_indices:
+            if idx < 2:
+                continue
+            direction = result["FVG"].iloc[idx]
+            if direction == 1:
+                self.assertLess(high[idx - 2], low[idx])
+                self.assertGreater(close[idx - 1], open_[idx - 1])
+            else:
+                self.assertGreater(low[idx - 2], high[idx])
+                self.assertLess(close[idx - 1], open_[idx - 1])
 
     def test_no_lookahead_via_truncation(self):
         """Causal FVG at bar i must not change when future bars removed."""
