@@ -349,3 +349,125 @@ def _ob_causal_loop(
         ob, top_arr, bottom_arr, obVolume, lowVolume, highVolume,
         percentage, mitigated_index, breaker,
     )
+
+
+@njit(cache=True)
+def compute_zone_features_per_bar(
+    n, close, high, low, atr,
+    zone_creation, zone_low, zone_high, zone_type,
+    zone_strength, zone_tf_weight, zone_freshness,
+    zone_lookback, zone_proximity_atr,
+):
+    """
+    Per-bar zone proximity, containment, and stack features.
+
+    zone_creation must be sorted ascending.
+    zone_freshness is mutated in-place (0=UNTESTED, 1=TESTED_ONCE, 2=MITIGATED).
+
+    Returns 12 arrays (all length n):
+      nearest_demand_dist, nearest_demand_strength, nearest_demand_freshness,
+      nearest_demand_tf_weight,
+      nearest_supply_dist, nearest_supply_strength, nearest_supply_freshness,
+      nearest_supply_tf_weight,
+      in_demand_zone, in_supply_zone, zone_stack_long, zone_stack_short
+    """
+    n_zones = len(zone_creation)
+
+    nearest_demand_dist = np.full(n, np.nan)
+    nearest_demand_strength = np.full(n, np.nan)
+    nearest_demand_freshness = np.full(n, np.nan)
+    nearest_demand_tf_weight = np.full(n, np.nan)
+    nearest_supply_dist = np.full(n, np.nan)
+    nearest_supply_strength = np.full(n, np.nan)
+    nearest_supply_freshness = np.full(n, np.nan)
+    nearest_supply_tf_weight = np.full(n, np.nan)
+    in_demand_zone = np.zeros(n, dtype=np.int32)
+    in_supply_zone = np.zeros(n, dtype=np.int32)
+    zone_stack_long = np.zeros(n, dtype=np.int32)
+    zone_stack_short = np.zeros(n, dtype=np.int32)
+
+    for i in range(n):
+        atr_val = atr[i]
+
+        # --- Window: zone_creation in [i - zone_lookback, i] ---
+        lo_bound = i - zone_lookback
+        if lo_bound < 0:
+            lo_bound = 0
+        win_start = np.searchsorted(zone_creation, lo_bound)
+        win_end = np.searchsorted(zone_creation, i, side='right')
+
+        if win_start >= win_end:
+            continue
+        if atr_val == 0.0:
+            # Can still update freshness, but skip distance/proximity
+            for z in range(win_start, win_end):
+                if zone_freshness[z] < 2:
+                    if zone_low[z] <= close[i] <= zone_high[z]:
+                        zone_freshness[z] += 1
+            continue
+
+        # --- Update freshness (zone_recent & freshness < 2) ---
+        for z in range(win_start, win_end):
+            if zone_freshness[z] < 2:
+                if zone_low[z] <= close[i] <= zone_high[z]:
+                    zone_freshness[z] += 1
+
+        # --- Nearest demand/supply (ALL zone_recent, including mitigated) ---
+        best_demand_dist = np.inf
+        best_demand_idx = -1
+        best_supply_dist = np.inf
+        best_supply_idx = -1
+
+        for z in range(win_start, win_end):
+            mid = (zone_low[z] + zone_high[z]) * 0.5
+            dist = abs(close[i] - mid) / atr_val
+
+            if zone_type[z] == 1:  # demand
+                if dist < best_demand_dist:
+                    best_demand_dist = dist
+                    best_demand_idx = z
+            else:  # supply (type == -1)
+                if dist < best_supply_dist:
+                    best_supply_dist = dist
+                    best_supply_idx = z
+
+        if best_demand_idx >= 0:
+            nearest_demand_dist[i] = best_demand_dist
+            nearest_demand_strength[i] = zone_strength[best_demand_idx]
+            nearest_demand_freshness[i] = float(zone_freshness[best_demand_idx])
+            nearest_demand_tf_weight[i] = float(zone_tf_weight[best_demand_idx])
+
+        if best_supply_idx >= 0:
+            nearest_supply_dist[i] = best_supply_dist
+            nearest_supply_strength[i] = zone_strength[best_supply_idx]
+            nearest_supply_freshness[i] = float(zone_freshness[best_supply_idx])
+            nearest_supply_tf_weight[i] = float(zone_tf_weight[best_supply_idx])
+
+        # --- in_zone and stack (zone_recent & freshness < 2 only) ---
+        for z in range(win_start, win_end):
+            if zone_freshness[z] >= 2:
+                continue
+
+            mid = (zone_low[z] + zone_high[z]) * 0.5
+
+            if zone_type[z] == 1:  # demand
+                if zone_low[z] <= close[i] <= zone_high[z]:
+                    in_demand_zone[i] = 1
+                d = (close[i] - mid) / atr_val
+                if d > 0.0 and d <= zone_proximity_atr:
+                    zone_stack_long[i] += 1
+            else:  # supply
+                if zone_low[z] <= close[i] <= zone_high[z]:
+                    in_supply_zone[i] = 1
+                d = (mid - close[i]) / atr_val
+                if d > 0.0 and d <= zone_proximity_atr:
+                    zone_stack_short[i] += 1
+
+    return (
+        nearest_demand_dist, nearest_demand_strength,
+        nearest_demand_freshness, nearest_demand_tf_weight,
+        nearest_supply_dist, nearest_supply_strength,
+        nearest_supply_freshness, nearest_supply_tf_weight,
+        in_demand_zone, in_supply_zone,
+        zone_stack_long, zone_stack_short,
+    )
