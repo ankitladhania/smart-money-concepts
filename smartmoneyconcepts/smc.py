@@ -250,6 +250,10 @@ class smc:
             )
         else:
             # Causal implementation
+            # Swings are placed at the CONFIRMATION bar (j), not the swing
+            # bar (p).  This means downstream consumers can treat the index
+            # as the first bar where the swing is known, without needing to
+            # add an extra offset.
             n = len(ohlc)
             high = ohlc["high"].values
             low = ohlc["low"].values
@@ -264,9 +268,11 @@ class smc:
             # Swing at p = j - half confirmed at j
             # Check: high[p] == rolling_max[j] where j = p + half
             swing_highs_lows = np.full(n, np.nan)
+            level = np.full(n, np.nan)
 
             # Causal detection + incremental dedup at confirmation time
-            confirmed = []  # list of (bar_index, swing_type) for kept swings
+            # Each entry is (swing_bar, confirm_bar, swing_type)
+            confirmed = []
 
             for j in range(full_window, n):
                 p = j - half
@@ -277,35 +283,40 @@ class smc:
                 else:
                     continue
 
+                swing_level = high[p] if new_type == 1 else low[p]
+
                 # Dedup tracking (no retroactive writes to past bars)
-                if confirmed and confirmed[-1][1] == new_type:
-                    prev_p = confirmed[-1][0]
+                if confirmed and confirmed[-1][2] == new_type:
+                    prev_p, prev_j, _ = confirmed[-1]
                     if new_type == 1 and high[p] >= high[prev_p]:
-                        confirmed[-1] = (p, new_type)
-                        swing_highs_lows[p] = new_type
+                        swing_highs_lows[prev_j] = np.nan
+                        level[prev_j] = np.nan
+                        confirmed[-1] = (p, j, new_type)
+                        swing_highs_lows[j] = new_type
+                        level[j] = swing_level
                     elif new_type == -1 and low[p] <= low[prev_p]:
-                        confirmed[-1] = (p, new_type)
-                        swing_highs_lows[p] = new_type
+                        swing_highs_lows[prev_j] = np.nan
+                        level[prev_j] = np.nan
+                        confirmed[-1] = (p, j, new_type)
+                        swing_highs_lows[j] = new_type
+                        level[j] = swing_level
                     else:
                         # Discard new swing (prev is more extreme)
                         pass
                 else:
-                    confirmed.append((p, new_type))
-                    swing_highs_lows[p] = new_type
+                    confirmed.append((p, j, new_type))
+                    swing_highs_lows[j] = new_type
+                    level[j] = swing_level
 
             # Synthetic start point only (no endpoint in causal mode)
             positions = np.where(~np.isnan(swing_highs_lows))[0]
             if len(positions) > 0:
                 if swing_highs_lows[positions[0]] == 1:
                     swing_highs_lows[0] = -1
+                    level[0] = low[0]
                 elif swing_highs_lows[positions[0]] == -1:
                     swing_highs_lows[0] = 1
-
-            level = np.where(
-                ~np.isnan(swing_highs_lows),
-                np.where(swing_highs_lows == 1, ohlc["high"], ohlc["low"]),
-                np.nan,
-            )
+                    level[0] = high[0]
 
             result = pd.concat(
                 [pd.Series(swing_highs_lows, name="HighLow"),
@@ -537,7 +548,9 @@ class smc:
         # Precompute swing indices (assumed sorted)
         swing_high_indices = np.flatnonzero(swing_hl == 1)
         swing_low_indices = np.flatnonzero(swing_hl == -1)
-        causal_half = swing_highs_lows.attrs.get("half", 0) if causal else 0
+        # Swings are placed at confirmation bars in causal mode, so no
+        # additional offset is needed.
+        causal_half = 0
 
         (
             ob, top_arr, bottom_arr, obVolume, lowVolume, highVolume,

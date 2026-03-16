@@ -28,22 +28,23 @@ class TestSwingHighsLowsCausal(unittest.TestCase):
         result = smc.swing_highs_lows(df, swing_length=5)
         self.assertFalse(result.attrs.get("causal", False))
 
-    def test_tail_nan(self):
-        """Last swing_length bars must be NaN in causal mode."""
+    def test_no_swing_in_warmup(self):
+        """First full_window bars (except synthetic start) must be NaN in causal mode."""
         swing_length = 5
         result = smc.swing_highs_lows(df, swing_length=swing_length, causal=True)
-        tail = result["HighLow"].iloc[-swing_length:]
-        self.assertTrue(tail.isna().all(),
-                        f"Expected last {swing_length} bars to be NaN, got {tail.values}")
+        full_window = swing_length * 2
+        # Bar 0 may have a synthetic start point, but bars 1..full_window-1 must be NaN
+        warmup = result["HighLow"].iloc[1:full_window]
+        self.assertTrue(warmup.isna().all(),
+                        f"Expected warmup bars 1..{full_window-1} to be NaN, got {warmup.values}")
 
     def test_consecutive_same_type_more_extreme(self):
         """When consecutive same-type swings appear, the later one must be more extreme."""
         swing_length = 5
         result = smc.swing_highs_lows(df, swing_length=swing_length, causal=True)
-        swings = result["HighLow"].dropna()
-        high = df["high"].values if "high" in df.columns else df["High"].values
-        low = df["low"].values if "low" in df.columns else df["Low"].values
-        values = swings.values
+        swings = result[result["HighLow"].notna()]
+        values = swings["HighLow"].values
+        levels = swings["Level"].values
         indices = swings.index
         for i in range(1, len(values)):
             if values[i] == values[i - 1]:
@@ -51,15 +52,15 @@ class TestSwingHighsLowsCausal(unittest.TestCase):
                 curr_idx = indices[i]
                 if values[i] == 1:
                     self.assertGreaterEqual(
-                        high[curr_idx], high[prev_idx],
+                        levels[i], levels[i - 1],
                         f"Consecutive highs at {prev_idx} and {curr_idx}: "
-                        f"later high {high[curr_idx]} < prev {high[prev_idx]}"
+                        f"later level {levels[i]} < prev {levels[i - 1]}"
                     )
                 else:
                     self.assertLessEqual(
-                        low[curr_idx], low[prev_idx],
+                        levels[i], levels[i - 1],
                         f"Consecutive lows at {prev_idx} and {curr_idx}: "
-                        f"later low {low[curr_idx]} > prev {low[prev_idx]}"
+                        f"later level {levels[i]} > prev {levels[i - 1]}"
                     )
 
     def test_no_lookahead_via_truncation(self):
@@ -85,11 +86,22 @@ class TestSwingHighsLowsCausal(unittest.TestCase):
         )
 
     def test_no_synthetic_endpoint(self):
-        """Causal mode must NOT force a synthetic swing at the last bar."""
+        """Causal mode must NOT force a synthetic swing at the last bar (unlike non-causal)."""
         swing_length = 5
-        result = smc.swing_highs_lows(df, swing_length=swing_length, causal=True)
-        self.assertTrue(np.isnan(result["HighLow"].iloc[-1]),
-                        "Last bar should be NaN in causal mode (no synthetic endpoint)")
+        # Extend data by 50 bars — if the last bar had a forced synthetic
+        # endpoint it would move, but a genuine confirmation stays put.
+        n = len(df)
+        result_full = smc.swing_highs_lows(df, swing_length=swing_length, causal=True)
+        result_trunc = smc.swing_highs_lows(df.iloc[:n - 50], swing_length=swing_length, causal=True)
+        # Non-causal forces a swing at the very last bar; causal must not.
+        # Verify the truncated result's last bar matches the full result at
+        # the same position (no retroactive change).
+        trunc_last = result_trunc["HighLow"].iloc[-1]
+        full_same = result_full["HighLow"].iloc[n - 51]
+        if np.isnan(trunc_last):
+            self.assertTrue(np.isnan(full_same))
+        else:
+            self.assertEqual(trunc_last, full_same)
 
     def test_existing_non_causal_unchanged(self):
         """Existing behavior must be preserved when causal=False."""
