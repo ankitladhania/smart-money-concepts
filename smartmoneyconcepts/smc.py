@@ -3,6 +3,7 @@ import pandas as pd
 import numpy as np
 from pandas import DataFrame, Series
 from datetime import datetime
+from smartmoneyconcepts._numba_helpers import _fvg_causal
 
 def inputvalidator(input_="ohlc"):
     def dfcheck(func):
@@ -76,60 +77,9 @@ class smc:
             close = ohlc["close"].values
             open_ = ohlc["open"].values
 
-            fvg = np.full(n, np.nan)
-            top = np.full(n, np.nan)
-            bottom = np.full(n, np.nan)
-
-            # At bar j (j >= 2), check if bars j-2, j-1, j form an FVG
-            # FVG is placed at j (the confirming bar)
-            for j in range(2, n):
-                if high[j-2] < low[j] and close[j-1] > open_[j-1]:
-                    # Bullish FVG
-                    fvg[j] = 1
-                    top[j] = low[j]
-                    bottom[j] = high[j-2]
-                elif low[j-2] > high[j] and close[j-1] < open_[j-1]:
-                    # Bearish FVG
-                    fvg[j] = -1
-                    top[j] = low[j-2]
-                    bottom[j] = high[j]
-
-            # join_consecutive (same logic as non-causal)
-            if join_consecutive:
-                for i in range(len(fvg) - 1):
-                    if fvg[i] == fvg[i + 1]:
-                        top[i + 1] = max(top[i], top[i + 1])
-                        bottom[i + 1] = min(bottom[i], bottom[i + 1])
-                        fvg[i] = top[i] = bottom[i] = np.nan
-
-            # Bar-by-bar mitigation tracking
-            mitigated_index = np.zeros(n, dtype=np.int32)
-            # Store FVG properties in arrays for O(1) lookup; use a set for O(1) removal
-            fvg_dir = np.zeros(n, dtype=np.int32)
-            fvg_top = np.empty(n, dtype=np.float64)
-            fvg_btm = np.empty(n, dtype=np.float64)
-            active_fvg_set = set()
-
-            for j in range(n):
-                # Check if current bar mitigates any active FVGs
-                to_remove = []
-                for idx in active_fvg_set:
-                    if fvg_dir[idx] == 1 and low[j] <= fvg_top[idx]:
-                        mitigated_index[idx] = j
-                        to_remove.append(idx)
-                    elif fvg_dir[idx] == -1 and high[j] >= fvg_btm[idx]:
-                        mitigated_index[idx] = j
-                        to_remove.append(idx)
-                if to_remove:
-                    active_fvg_set.difference_update(to_remove)
-
-                # If this bar has an FVG, add to active set
-                if not np.isnan(fvg[j]):
-                    fvg_dir[j] = int(fvg[j])
-                    fvg_top[j] = top[j]
-                    fvg_btm[j] = bottom[j]
-                    active_fvg_set.add(j)
-
+            fvg, top, bottom, mitigated_index = _fvg_causal(
+                high, low, close, open_, n, join_consecutive
+            )
             mitigated_index = np.where(np.isnan(fvg), np.nan, mitigated_index)
 
             result = pd.concat(
