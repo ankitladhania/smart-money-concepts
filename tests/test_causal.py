@@ -103,6 +103,70 @@ class TestSwingHighsLowsCausal(unittest.TestCase):
         else:
             self.assertEqual(trunc_last, full_same)
 
+    def test_no_retroactive_nan_on_dedup(self):
+        """Regression: when a more extreme same-type swing is confirmed later,
+        the earlier swing must NOT be retroactively erased from the output.
+
+        Constructs synthetic data with two consecutive swing highs (no swing
+        lows in between) where the second is higher. Both must remain in the
+        output because the first was legitimately confirmed before the second
+        existed.
+
+        Data design (swing_length=3, half=3, full_window=6):
+        - Highs: slightly decreasing baseline (~2.5→2.0) so no baseline bar
+          is ever the rolling max of its window. Two injected peaks at bars
+          15 (high=3.0) and 25 (high=4.0) dominate their windows.
+        - Lows: monotonically increasing (1.0→1.5) so no bar is ever the
+          rolling min of its window → no swing lows detected.
+        - Result: only two swing events, both highs, triggering the
+          consecutive same-type dedup path.
+        """
+        swing_length = 3
+        half = swing_length
+        n = 50
+
+        high = np.linspace(2.5, 2.0, n)
+        low = np.linspace(1.0, 1.5, n)
+        close = (high + low) / 2
+        open_ = close.copy()
+
+        # Two peaks that clearly dominate their windows
+        high[15] = 3.0   # first swing high, confirmed at bar 18
+        high[25] = 4.0   # second (higher) swing high, confirmed at bar 28
+
+        synth = pd.DataFrame({
+            "Open": open_, "High": high, "Low": low, "Close": close,
+        })
+
+        result = smc.swing_highs_lows(synth, swing_length=swing_length, causal=True)
+        hl = result["HighLow"]
+
+        # Find all swing highs in the output
+        swing_high_bars = hl.index[hl == 1].tolist()
+
+        # Both confirmation bars must be present
+        first_confirm = 15 + half   # bar 18
+        second_confirm = 25 + half  # bar 28
+
+        self.assertIn(first_confirm, swing_high_bars,
+                       f"First swing high (confirmed at bar {first_confirm}) was "
+                       f"retroactively erased. Swing highs at: {swing_high_bars}")
+        self.assertIn(second_confirm, swing_high_bars,
+                       f"Second swing high (confirmed at bar {second_confirm}) missing. "
+                       f"Swing highs at: {swing_high_bars}")
+
+        # Truncation: cutting before bar 25 must preserve the first swing
+        trunc_at = 22  # after first confirmation (18), before second peak (25)
+        trunc_result = smc.swing_highs_lows(
+            synth.iloc[:trunc_at], swing_length=swing_length, causal=True
+        )
+        trunc_hl = trunc_result["HighLow"]
+        self.assertEqual(
+            hl.iloc[first_confirm], trunc_hl.iloc[first_confirm],
+            "First swing high differs between full and truncated data — "
+            "retroactive erasure detected"
+        )
+
     def test_existing_non_causal_unchanged(self):
         """Existing behavior must be preserved when causal=False."""
         result = smc.swing_highs_lows(df, swing_length=5, causal=False)

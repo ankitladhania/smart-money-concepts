@@ -289,14 +289,12 @@ class smc:
                 if confirmed and confirmed[-1][2] == new_type:
                     prev_p, prev_j, _ = confirmed[-1]
                     if new_type == 1 and high[p] >= high[prev_p]:
-                        swing_highs_lows[prev_j] = np.nan
-                        level[prev_j] = np.nan
+                        # New swing is more extreme — track it for future dedup
+                        # but keep prev_j in output (it was valid when confirmed)
                         confirmed[-1] = (p, j, new_type)
                         swing_highs_lows[j] = new_type
                         level[j] = swing_level
                     elif new_type == -1 and low[p] <= low[prev_p]:
-                        swing_highs_lows[prev_j] = np.nan
-                        level[prev_j] = np.nan
                         confirmed[-1] = (p, j, new_type)
                         swing_highs_lows[j] = new_type
                         level[j] = swing_level
