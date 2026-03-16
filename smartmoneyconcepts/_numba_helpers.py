@@ -371,8 +371,6 @@ def compute_zone_features_per_bar(
       nearest_supply_tf_weight,
       in_demand_zone, in_supply_zone, zone_stack_long, zone_stack_short
     """
-    n_zones = len(zone_creation)
-
     nearest_demand_dist = np.full(n, np.nan)
     nearest_demand_strength = np.full(n, np.nan)
     nearest_demand_freshness = np.full(n, np.nan)
@@ -489,8 +487,6 @@ def compute_fvg_features_per_bar(
       nearest_bull_fvg_dist, nearest_bear_fvg_dist,
       in_bull_fvg, in_bear_fvg, fvg_count_nearby
     """
-    n_fvgs = len(fvg_creation)
-
     nearest_bull_fvg_dist = np.full(n, np.nan)
     nearest_bear_fvg_dist = np.full(n, np.nan)
     in_bull_fvg = np.zeros(n, dtype=np.int32)
