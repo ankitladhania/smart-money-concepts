@@ -104,22 +104,31 @@ class smc:
 
             # Bar-by-bar mitigation tracking
             mitigated_index = np.zeros(n, dtype=np.int32)
-            active_fvgs = []  # list of (fvg_idx, direction, top, bottom)
+            # Store FVG properties in arrays for O(1) lookup; use a set for O(1) removal
+            fvg_dir = np.zeros(n, dtype=np.int32)
+            fvg_top = np.empty(n, dtype=np.float64)
+            fvg_btm = np.empty(n, dtype=np.float64)
+            active_fvg_set = set()
 
             for j in range(n):
                 # Check if current bar mitigates any active FVGs
-                for fvg_info in active_fvgs.copy():
-                    fvg_idx, direction, ftop, fbottom = fvg_info
-                    if direction == 1 and low[j] <= ftop:
-                        mitigated_index[fvg_idx] = j
-                        active_fvgs.remove(fvg_info)
-                    elif direction == -1 and high[j] >= fbottom:
-                        mitigated_index[fvg_idx] = j
-                        active_fvgs.remove(fvg_info)
+                to_remove = []
+                for idx in active_fvg_set:
+                    if fvg_dir[idx] == 1 and low[j] <= fvg_top[idx]:
+                        mitigated_index[idx] = j
+                        to_remove.append(idx)
+                    elif fvg_dir[idx] == -1 and high[j] >= fvg_btm[idx]:
+                        mitigated_index[idx] = j
+                        to_remove.append(idx)
+                if to_remove:
+                    active_fvg_set.difference_update(to_remove)
 
-                # If this bar has an FVG, add to active list
+                # If this bar has an FVG, add to active set
                 if not np.isnan(fvg[j]):
-                    active_fvgs.append((j, int(fvg[j]), top[j], bottom[j]))
+                    fvg_dir[j] = int(fvg[j])
+                    fvg_top[j] = top[j]
+                    fvg_btm[j] = bottom[j]
+                    active_fvg_set.add(j)
 
             mitigated_index = np.where(np.isnan(fvg), np.nan, mitigated_index)
 
@@ -472,34 +481,41 @@ class smc:
 
         if causal:
             # Bar-by-bar break validation
-            active_patterns = []
-            for i in np.where(np.logical_or(bos != 0, choch != 0))[0]:
-                active_patterns.append(i)
+            # Extract numpy arrays once to avoid pandas .iloc overhead in the loop
+            break_high_arr = ohlc["close"].values if close_break else ohlc["high"].values
+            break_low_arr = ohlc["close"].values if close_break else ohlc["low"].values
+
+            active_patterns = list(int(i) for i in np.where(np.logical_or(bos != 0, choch != 0))[0])
 
             broken = np.zeros(len(ohlc), dtype=np.int32)
-            for bar in range(len(ohlc)):
-                for i in active_patterns.copy():
+            n_bars = len(ohlc)
+            for bar in range(n_bars):
+                to_remove = []
+                for i in active_patterns:
                     if bar <= i + 1:
                         continue
                     if bos[i] == 1 or choch[i] == 1:
-                        if ohlc["close" if close_break else "high"].iloc[bar] > level[i]:
+                        if break_high_arr[bar] > level[i]:
                             broken[i] = bar
-                            # Supersession: remove earlier patterns broken at same or later bar
-                            for k in active_patterns.copy():
+                            # Supersession: zero earlier patterns broken at same or later bar
+                            for k in active_patterns:
                                 if k < i and broken[k] >= bar:
                                     bos[k] = 0
                                     choch[k] = 0
                                     level[k] = 0
-                            active_patterns.remove(i)
+                            to_remove.append(i)
                     elif bos[i] == -1 or choch[i] == -1:
-                        if ohlc["close" if close_break else "low"].iloc[bar] < level[i]:
+                        if break_low_arr[bar] < level[i]:
                             broken[i] = bar
-                            for k in active_patterns.copy():
+                            for k in active_patterns:
                                 if k < i and broken[k] >= bar:
                                     bos[k] = 0
                                     choch[k] = 0
                                     level[k] = 0
-                            active_patterns.remove(i)
+                            to_remove.append(i)
+                if to_remove:
+                    remove_set = set(to_remove)
+                    active_patterns = [p for p in active_patterns if p not in remove_set]
 
             # Do NOT remove unbroken patterns (they stay with BrokenIndex=NaN)
             bos = np.where(bos != 0, bos, np.nan)
@@ -610,12 +626,13 @@ class smc:
         swing_low_indices = np.flatnonzero(swing_hl == -1)
         causal_half = swing_highs_lows.attrs.get("half", 0) if causal else 0
 
-        # List to track active bullish order blocks
-        active_bullish = []
+        # Set to track active bullish order blocks (O(1) add/remove)
+        active_bullish = set()
         for i in range(ohlc_len):
             close_index = i
             # Update existing bullish OB
-            for idx in active_bullish.copy():
+            to_remove = []
+            for idx in active_bullish:
                 if breaker[idx]:
                     if not causal:
                         if _high[close_index] > top_arr[idx]:
@@ -628,15 +645,17 @@ class smc:
                             highVolume[idx] = 0.0
                             mitigated_index[idx] = 0
                             percentage[idx] = 0.0
-                            active_bullish.remove(idx)
+                            to_remove.append(idx)
                     else:
                         # Causal: don't erase historical OB, just stop tracking
-                        active_bullish.remove(idx)
+                        to_remove.append(idx)
                 else:
                     if ((not close_mitigation and _low[close_index] < bottom_arr[idx])
                         or (close_mitigation and min(_open[close_index], _close[close_index]) < bottom_arr[idx])):
                         breaker[idx] = True
                         mitigated_index[idx] = close_index - 1
+            if to_remove:
+                active_bullish.difference_update(to_remove)
 
             # Find last confirmed swing high index less than current candle
             if causal_half > 0:
@@ -682,14 +701,15 @@ class smc:
                     highVolume[store_idx] = vol_cur + vol_prev1
                     max_vol = max(highVolume[store_idx], lowVolume[store_idx])
                     percentage[store_idx] = (min(highVolume[store_idx], lowVolume[store_idx]) / max_vol * 100.0) if max_vol != 0 else 100.0
-                    active_bullish.append(store_idx)
+                    active_bullish.add(store_idx)
 
-        # List to track active bearish order blocks
-        active_bearish = []
+        # Set to track active bearish order blocks (O(1) add/remove)
+        active_bearish = set()
         for i in range(ohlc_len):
             close_index = i
             # Update existing bearish OB
-            for idx in active_bearish.copy():
+            to_remove = []
+            for idx in active_bearish:
                 if breaker[idx]:
                     if not causal:
                         if _low[close_index] < bottom_arr[idx]:
@@ -701,15 +721,17 @@ class smc:
                             highVolume[idx] = 0.0
                             mitigated_index[idx] = 0
                             percentage[idx] = 0.0
-                            active_bearish.remove(idx)
+                            to_remove.append(idx)
                     else:
                         # Causal: don't erase historical OB, just stop tracking
-                        active_bearish.remove(idx)
+                        to_remove.append(idx)
                 else:
                     if ((not close_mitigation and _high[close_index] > top_arr[idx])
                         or (close_mitigation and max(_open[close_index], _close[close_index]) > top_arr[idx])):
                         breaker[idx] = True
                         mitigated_index[idx] = close_index
+            if to_remove:
+                active_bearish.difference_update(to_remove)
 
             # Find last confirmed swing low index less than current candle
             if causal_half > 0:
@@ -749,7 +771,7 @@ class smc:
                     highVolume[store_idx] = vol_prev2
                     max_vol = max(highVolume[store_idx], lowVolume[store_idx])
                     percentage[store_idx] = (min(highVolume[store_idx], lowVolume[store_idx]) / max_vol * 100.0) if max_vol != 0 else 100.0
-                    active_bearish.append(store_idx)
+                    active_bearish.add(store_idx)
 
         # Convert zeros to NaN where OB was not set
         ob = np.where(ob != 0, ob, np.nan)
@@ -836,34 +858,47 @@ class smc:
                 pip_range_bar = (running_high[bar] - running_low[bar]) * range_percent
 
                 # 1. Check sweeps for confirmed groups
-                for liq_info in active_liq.copy():
+                to_remove = []
+                for j_idx, liq_info in enumerate(active_liq):
                     liq_idx, threshold, direction = liq_info
                     if bar <= liq_idx:
                         continue
                     if direction == 1 and ohlc_high[bar] >= threshold:
                         liquidity_swept[liq_idx] = bar
-                        active_liq.remove(liq_info)
+                        to_remove.append(j_idx)
                     elif direction == -1 and ohlc_low[bar] <= threshold:
                         liquidity_swept[liq_idx] = bar
-                        active_liq.remove(liq_info)
+                        to_remove.append(j_idx)
+                if to_remove:
+                    rm = set(to_remove)
+                    active_liq = [x for k, x in enumerate(active_liq) if k not in rm]
 
                 # 2. Check sweeps for pending groups (closes them)
-                for g in pending_bull.copy():
+                to_remove = []
+                for j_idx, g in enumerate(pending_bull):
                     g_start, g_levels, g_last = g
                     avg = sum(g_levels) / len(g_levels)
                     if bar > g_last and ohlc_high[bar] >= avg + pip_range_bar:
-                        pending_bull.remove(g)
+                        to_remove.append(j_idx)
+                if to_remove:
+                    rm = set(to_remove)
+                    pending_bull = [x for k, x in enumerate(pending_bull) if k not in rm]
 
-                for g in pending_bear.copy():
+                to_remove = []
+                for j_idx, g in enumerate(pending_bear):
                     g_start, g_levels, g_last = g
                     avg = sum(g_levels) / len(g_levels)
                     if bar > g_last and ohlc_low[bar] <= avg - pip_range_bar:
-                        pending_bear.remove(g)
+                        to_remove.append(j_idx)
+                if to_remove:
+                    rm = set(to_remove)
+                    pending_bear = [x for k, x in enumerate(pending_bear) if k not in rm]
 
                 # 3. If this bar has a swing, try to join/create group
                 if shl_HL[bar] == 1:
                     joined = False
-                    for g in pending_bull.copy():
+                    join_idx = None
+                    for j_idx, g in enumerate(pending_bull):
                         g_start, g_levels, g_last = g
                         avg = sum(g_levels) / len(g_levels)
                         if abs(shl_Level[bar] - avg) <= pip_range_bar:
@@ -873,16 +908,19 @@ class smc:
                             liquidity[bar] = 1
                             liquidity_level[bar] = avg
                             liquidity_end[bar] = g_start  # points back to group start
-                            pending_bull.remove(g)
+                            join_idx = j_idx
                             active_liq.append((bar, avg + pip_range_bar, 1))
                             joined = True
                             break
-                    if not joined:
+                    if join_idx is not None:
+                        pending_bull.pop(join_idx)
+                    elif not joined:
                         pending_bull.append([bar, [shl_Level[bar]], bar])
 
                 elif shl_HL[bar] == -1:
                     joined = False
-                    for g in pending_bear.copy():
+                    join_idx = None
+                    for j_idx, g in enumerate(pending_bear):
                         g_start, g_levels, g_last = g
                         avg = sum(g_levels) / len(g_levels)
                         if abs(shl_Level[bar] - avg) <= pip_range_bar:
@@ -891,11 +929,13 @@ class smc:
                             liquidity[bar] = -1
                             liquidity_level[bar] = avg
                             liquidity_end[bar] = g_start
-                            pending_bear.remove(g)
+                            join_idx = j_idx
                             active_liq.append((bar, avg - pip_range_bar, -1))
                             joined = True
                             break
-                    if not joined:
+                    if join_idx is not None:
+                        pending_bear.pop(join_idx)
+                    elif not joined:
                         pending_bear.append([bar, [shl_Level[bar]], bar])
 
             liq_series = pd.Series(liquidity, name="Liquidity")
