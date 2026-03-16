@@ -55,6 +55,34 @@ retracements = smc.retracements(ohlc, swings, causal=True)
 
 Default `causal=False` preserves all existing behavior exactly.
 
+## Performance
+
+All causal-mode hot paths are compiled with **Numba `@njit(cache=True)`**, eliminating Python interpreter overhead and enabling near-C performance on large datasets.
+
+**JIT-compiled internals:**
+- `fvg()` — detection, consecutive joining, and bar-by-bar mitigation in a single njit call
+- `bos_choch()` — bar-by-bar break validation with pattern supersession
+- `ob()` — full bullish + bearish OB detection and mitigation loops, with `searchsorted`-based swing lookups replacing per-iteration array filtering
+
+**Algorithmic optimizations:**
+- `searchsorted` for O(log n) lookback windowing (replacing O(n) linear scans)
+- Set-based deferred removal replacing `list.copy()`/`remove()` in causal loops
+
+**Per-bar feature helpers** (for ML pipelines):
+- `compute_zone_features_per_bar` — zone proximity, containment, freshness, and stack features (12 output arrays)
+- `compute_fvg_features_per_bar` — FVG proximity, containment, and count features (5 output arrays)
+
+These helpers live in `smartmoneyconcepts._numba_helpers` and are designed for direct import by external pipelines:
+
+```python
+from smartmoneyconcepts._numba_helpers import (
+    compute_zone_features_per_bar,
+    compute_fvg_features_per_bar,
+)
+```
+
+First call incurs JIT compilation (~1-3s); subsequent calls use the on-disk cache and run in milliseconds.
+
 ## Indicators
 
 ### Fair Value Gap (FVG)
