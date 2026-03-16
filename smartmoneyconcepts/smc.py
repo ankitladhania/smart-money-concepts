@@ -640,11 +640,10 @@ class smc:
 
             # Find last confirmed swing high index less than current candle
             if causal_half > 0:
-                valid_high = swing_high_indices[swing_high_indices + causal_half <= close_index]
+                limit_idx = np.searchsorted(swing_high_indices, close_index - causal_half + 1)
             else:
-                valid_high = swing_high_indices
-            pos = np.searchsorted(valid_high, close_index)
-            last_top_index = valid_high[pos - 1] if pos > 0 else None
+                limit_idx = np.searchsorted(swing_high_indices, close_index)
+            last_top_index = swing_high_indices[limit_idx - 1] if limit_idx > 0 else None
 
             if last_top_index is not None:
                 if _close[close_index] > _high[last_top_index] and not crossed[last_top_index]:
@@ -714,11 +713,10 @@ class smc:
 
             # Find last confirmed swing low index less than current candle
             if causal_half > 0:
-                valid_low = swing_low_indices[swing_low_indices + causal_half <= close_index]
+                limit_idx = np.searchsorted(swing_low_indices, close_index - causal_half + 1)
             else:
-                valid_low = swing_low_indices
-            pos = np.searchsorted(valid_low, close_index)
-            last_btm_index = valid_low[pos - 1] if pos > 0 else None
+                limit_idx = np.searchsorted(swing_low_indices, close_index)
+            last_btm_index = swing_low_indices[limit_idx - 1] if limit_idx > 0 else None
 
             if last_btm_index is not None:
                 if _close[close_index] < _low[last_btm_index] and not crossed[last_btm_index]:
