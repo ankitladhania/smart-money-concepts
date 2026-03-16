@@ -471,3 +471,81 @@ def compute_zone_features_per_bar(
         in_demand_zone, in_supply_zone,
         zone_stack_long, zone_stack_short,
     )
+
+
+@njit(cache=True)
+def compute_fvg_features_per_bar(
+    n, close, high, low, atr,
+    fvg_creation, fvg_low, fvg_high, fvg_type,
+    fvg_mitigation_index, fvg_lookback, fvg_proximity_atr,
+):
+    """
+    Per-bar FVG proximity, containment, and count features.
+
+    fvg_creation must be sorted ascending.
+    fvg_mitigation_index: 0 = unfilled, >0 = bar index where filled.
+
+    Returns 5 arrays (all length n):
+      nearest_bull_fvg_dist, nearest_bear_fvg_dist,
+      in_bull_fvg, in_bear_fvg, fvg_count_nearby
+    """
+    n_fvgs = len(fvg_creation)
+
+    nearest_bull_fvg_dist = np.full(n, np.nan)
+    nearest_bear_fvg_dist = np.full(n, np.nan)
+    in_bull_fvg = np.zeros(n, dtype=np.int32)
+    in_bear_fvg = np.zeros(n, dtype=np.int32)
+    fvg_count_nearby = np.zeros(n, dtype=np.int32)
+
+    for i in range(n):
+        atr_val = atr[i]
+
+        # --- Window: fvg_creation in [i - fvg_lookback, i] ---
+        lo_bound = i - fvg_lookback
+        if lo_bound < 0:
+            lo_bound = 0
+        win_start = np.searchsorted(fvg_creation, lo_bound)
+        win_end = np.searchsorted(fvg_creation, i, side='right')
+
+        if win_start >= win_end:
+            continue
+        if atr_val == 0.0:
+            continue
+
+        best_bull_dist = np.inf
+        best_bear_dist = np.inf
+
+        for f in range(win_start, win_end):
+            # Filter: unfilled at bar i
+            mit = fvg_mitigation_index[f]
+            if mit > 0 and mit <= i:
+                continue
+
+            mid = (fvg_low[f] + fvg_high[f]) * 0.5
+            dist = abs(close[i] - mid) / atr_val
+
+            if fvg_type[f] == 1:  # bull
+                if dist < best_bull_dist:
+                    best_bull_dist = dist
+                # Wick overlap check
+                if low[i] <= fvg_high[f] and high[i] >= fvg_low[f]:
+                    in_bull_fvg[i] = 1
+            else:  # bear (type == -1)
+                if dist < best_bear_dist:
+                    best_bear_dist = dist
+                if low[i] <= fvg_high[f] and high[i] >= fvg_low[f]:
+                    in_bear_fvg[i] = 1
+
+            # Count nearby (both directions)
+            if dist <= fvg_proximity_atr:
+                fvg_count_nearby[i] += 1
+
+        if best_bull_dist < np.inf:
+            nearest_bull_fvg_dist[i] = best_bull_dist
+        if best_bear_dist < np.inf:
+            nearest_bear_fvg_dist[i] = best_bear_dist
+
+    return (
+        nearest_bull_fvg_dist, nearest_bear_fvg_dist,
+        in_bull_fvg, in_bear_fvg, fvg_count_nearby,
+    )
