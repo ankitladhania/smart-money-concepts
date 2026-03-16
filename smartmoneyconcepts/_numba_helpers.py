@@ -125,3 +125,227 @@ def _bos_choch_causal_break(bos, choch, level, break_high_arr, break_low_arr, n)
         n_patterns = write
 
     return broken
+
+
+@njit(cache=True)
+def _ob_causal_loop(
+    ohlc_len, _open, _high, _low, _close, _volume,
+    swing_high_indices, swing_low_indices,
+    causal_half, close_mitigation, causal,
+):
+    """
+    Full OB detection: bullish loop then bearish loop.
+
+    Returns: (ob, top_arr, bottom_arr, obVolume, lowVolume, highVolume,
+              percentage, mitigated_index, breaker)
+    """
+    crossed = np.full(ohlc_len, False)
+    ob = np.zeros(ohlc_len, dtype=np.int32)
+    top_arr = np.zeros(ohlc_len, dtype=np.float64)
+    bottom_arr = np.zeros(ohlc_len, dtype=np.float64)
+    obVolume = np.zeros(ohlc_len, dtype=np.float64)
+    lowVolume = np.zeros(ohlc_len, dtype=np.float64)
+    highVolume = np.zeros(ohlc_len, dtype=np.float64)
+    percentage = np.zeros(ohlc_len, dtype=np.float64)
+    mitigated_index = np.zeros(ohlc_len, dtype=np.int32)
+    breaker = np.full(ohlc_len, False)
+
+    # ========== Bullish OB loop ==========
+    active = np.empty(ohlc_len, dtype=np.int64)
+    n_active = 0
+
+    for i in range(ohlc_len):
+        # -- Check active bullish OBs --
+        for k in range(n_active):
+            idx = active[k]
+            if breaker[idx]:
+                if not causal:
+                    if _high[i] > top_arr[idx]:
+                        ob[idx] = 0
+                        top_arr[idx] = 0.0
+                        bottom_arr[idx] = 0.0
+                        obVolume[idx] = 0.0
+                        lowVolume[idx] = 0.0
+                        highVolume[idx] = 0.0
+                        mitigated_index[idx] = 0
+                        percentage[idx] = 0.0
+                        active[k] = -1
+                else:
+                    active[k] = -1
+            else:
+                mitigated = False
+                if not close_mitigation:
+                    if _low[i] < bottom_arr[idx]:
+                        mitigated = True
+                else:
+                    body_low = min(_open[i], _close[i])
+                    if body_low < bottom_arr[idx]:
+                        mitigated = True
+                if mitigated:
+                    breaker[idx] = True
+                    mitigated_index[idx] = np.int32(i - 1)
+
+        # Compact
+        write = 0
+        for k in range(n_active):
+            if active[k] != -1:
+                active[write] = active[k]
+                write += 1
+        n_active = write
+
+        # -- Find last confirmed swing high --
+        if causal_half > 0:
+            limit_idx = np.searchsorted(swing_high_indices, i - causal_half + 1)
+        else:
+            limit_idx = np.searchsorted(swing_high_indices, i)
+
+        last_top_index = -1
+        if limit_idx > 0:
+            last_top_index = swing_high_indices[limit_idx - 1]
+
+        if last_top_index >= 0:
+            if _close[i] > _high[last_top_index] and not crossed[last_top_index]:
+                crossed[last_top_index] = True
+                default_index = i - 1
+                obBtm = _high[default_index]
+                obTop = _low[default_index]
+                obIndex = default_index
+
+                if i - last_top_index > 1:
+                    start = last_top_index + 1
+                    end = i
+                    if end > start:
+                        # Last occurrence of minimum low in segment
+                        min_val = _low[start]
+                        min_idx = start
+                        for s in range(start + 1, end):
+                            if _low[s] <= min_val:
+                                min_val = _low[s]
+                                min_idx = s
+                        obBtm = _low[min_idx]
+                        obTop = _high[min_idx]
+                        obIndex = min_idx
+
+                store_idx = i if causal else obIndex
+                ob[store_idx] = 1
+                top_arr[store_idx] = obTop
+                bottom_arr[store_idx] = obBtm
+                vol_cur = _volume[i]
+                vol_prev1 = _volume[i - 1] if i >= 1 else 0.0
+                vol_prev2 = _volume[i - 2] if i >= 2 else 0.0
+                obVolume[store_idx] = vol_cur + vol_prev1 + vol_prev2
+                lowVolume[store_idx] = vol_prev2
+                highVolume[store_idx] = vol_cur + vol_prev1
+                max_vol = max(highVolume[store_idx], lowVolume[store_idx])
+                if max_vol != 0.0:
+                    percentage[store_idx] = (
+                        min(highVolume[store_idx], lowVolume[store_idx])
+                        / max_vol
+                        * 100.0
+                    )
+                else:
+                    percentage[store_idx] = 100.0
+                active[n_active] = store_idx
+                n_active += 1
+
+    # ========== Bearish OB loop ==========
+    n_active = 0  # reset for bearish
+
+    for i in range(ohlc_len):
+        # -- Check active bearish OBs --
+        for k in range(n_active):
+            idx = active[k]
+            if breaker[idx]:
+                if not causal:
+                    if _low[i] < bottom_arr[idx]:
+                        ob[idx] = 0
+                        top_arr[idx] = 0.0
+                        bottom_arr[idx] = 0.0
+                        obVolume[idx] = 0.0
+                        lowVolume[idx] = 0.0
+                        highVolume[idx] = 0.0
+                        mitigated_index[idx] = 0
+                        percentage[idx] = 0.0
+                        active[k] = -1
+                else:
+                    active[k] = -1
+            else:
+                mitigated = False
+                if not close_mitigation:
+                    if _high[i] > top_arr[idx]:
+                        mitigated = True
+                else:
+                    body_high = max(_open[i], _close[i])
+                    if body_high > top_arr[idx]:
+                        mitigated = True
+                if mitigated:
+                    breaker[idx] = True
+                    mitigated_index[idx] = np.int32(i)
+
+        # Compact
+        write = 0
+        for k in range(n_active):
+            if active[k] != -1:
+                active[write] = active[k]
+                write += 1
+        n_active = write
+
+        # -- Find last confirmed swing low --
+        if causal_half > 0:
+            limit_idx = np.searchsorted(swing_low_indices, i - causal_half + 1)
+        else:
+            limit_idx = np.searchsorted(swing_low_indices, i)
+
+        last_btm_index = -1
+        if limit_idx > 0:
+            last_btm_index = swing_low_indices[limit_idx - 1]
+
+        if last_btm_index >= 0:
+            if _close[i] < _low[last_btm_index] and not crossed[last_btm_index]:
+                crossed[last_btm_index] = True
+                default_index = i - 1
+                obTop = _high[default_index]
+                obBtm = _low[default_index]
+                obIndex = default_index
+
+                if i - last_btm_index > 1:
+                    start = last_btm_index + 1
+                    end = i
+                    if end > start:
+                        # Last occurrence of maximum high in segment
+                        max_val = _high[start]
+                        max_idx = start
+                        for s in range(start + 1, end):
+                            if _high[s] >= max_val:
+                                max_val = _high[s]
+                                max_idx = s
+                        obTop = _high[max_idx]
+                        obBtm = _low[max_idx]
+                        obIndex = max_idx
+
+                store_idx = i if causal else obIndex
+                ob[store_idx] = -1
+                top_arr[store_idx] = obTop
+                bottom_arr[store_idx] = obBtm
+                vol_cur = _volume[i]
+                vol_prev1 = _volume[i - 1] if i >= 1 else 0.0
+                vol_prev2 = _volume[i - 2] if i >= 2 else 0.0
+                obVolume[store_idx] = vol_cur + vol_prev1 + vol_prev2
+                lowVolume[store_idx] = vol_cur + vol_prev1
+                highVolume[store_idx] = vol_prev2
+                max_vol = max(highVolume[store_idx], lowVolume[store_idx])
+                if max_vol != 0.0:
+                    percentage[store_idx] = (
+                        min(highVolume[store_idx], lowVolume[store_idx])
+                        / max_vol
+                        * 100.0
+                    )
+                else:
+                    percentage[store_idx] = 100.0
+                active[n_active] = store_idx
+                n_active += 1
+
+    return (
+        ob, top_arr, bottom_arr, obVolume, lowVolume, highVolume,
+        percentage, mitigated_index, breaker,
+    )

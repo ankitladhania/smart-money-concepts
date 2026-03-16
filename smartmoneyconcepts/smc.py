@@ -3,7 +3,11 @@ import pandas as pd
 import numpy as np
 from pandas import DataFrame, Series
 from datetime import datetime
-from smartmoneyconcepts._numba_helpers import _fvg_causal, _bos_choch_causal_break
+from smartmoneyconcepts._numba_helpers import (
+    _fvg_causal,
+    _bos_choch_causal_break,
+    _ob_causal_loop,
+)
 
 def inputvalidator(input_="ohlc"):
     def dfcheck(func):
@@ -530,169 +534,19 @@ class smc:
         _volume = ohlc["volume"].values
         swing_hl = swing_highs_lows["HighLow"].values
 
-        # Pre-allocate arrays
-        crossed = np.full(ohlc_len, False, dtype=bool)
-        ob = np.zeros(ohlc_len, dtype=np.int32)
-        top_arr = np.zeros(ohlc_len, dtype=np.float32)
-        bottom_arr = np.zeros(ohlc_len, dtype=np.float32)
-        obVolume = np.zeros(ohlc_len, dtype=np.float32)
-        lowVolume = np.zeros(ohlc_len, dtype=np.float32)
-        highVolume = np.zeros(ohlc_len, dtype=np.float32)
-        percentage = np.zeros(ohlc_len, dtype=np.float32)
-        mitigated_index = np.zeros(ohlc_len, dtype=np.int32)
-        breaker = np.full(ohlc_len, False, dtype=bool)
-
         # Precompute swing indices (assumed sorted)
         swing_high_indices = np.flatnonzero(swing_hl == 1)
         swing_low_indices = np.flatnonzero(swing_hl == -1)
         causal_half = swing_highs_lows.attrs.get("half", 0) if causal else 0
 
-        # Set to track active bullish order blocks (O(1) add/remove)
-        active_bullish = set()
-        for i in range(ohlc_len):
-            close_index = i
-            # Update existing bullish OB
-            to_remove = []
-            for idx in active_bullish:
-                if breaker[idx]:
-                    if not causal:
-                        if _high[close_index] > top_arr[idx]:
-                            # Reset this OB
-                            ob[idx] = 0
-                            top_arr[idx] = 0.0
-                            bottom_arr[idx] = 0.0
-                            obVolume[idx] = 0.0
-                            lowVolume[idx] = 0.0
-                            highVolume[idx] = 0.0
-                            mitigated_index[idx] = 0
-                            percentage[idx] = 0.0
-                            to_remove.append(idx)
-                    else:
-                        # Causal: don't erase historical OB, just stop tracking
-                        to_remove.append(idx)
-                else:
-                    if ((not close_mitigation and _low[close_index] < bottom_arr[idx])
-                        or (close_mitigation and min(_open[close_index], _close[close_index]) < bottom_arr[idx])):
-                        breaker[idx] = True
-                        mitigated_index[idx] = close_index - 1
-            if to_remove:
-                active_bullish.difference_update(to_remove)
-
-            # Find last confirmed swing high index less than current candle
-            if causal_half > 0:
-                limit_idx = np.searchsorted(swing_high_indices, close_index - causal_half + 1)
-            else:
-                limit_idx = np.searchsorted(swing_high_indices, close_index)
-            last_top_index = swing_high_indices[limit_idx - 1] if limit_idx > 0 else None
-
-            if last_top_index is not None:
-                if _close[close_index] > _high[last_top_index] and not crossed[last_top_index]:
-                    crossed[last_top_index] = True
-                    # Initialise with default values from previous candle
-                    default_index = close_index - 1
-                    obBtm = _high[default_index]
-                    obTop = _low[default_index]
-                    obIndex = default_index
-                    # Look for a lower low between last_top_index and current candle
-                    if close_index - last_top_index > 1:
-                        start = last_top_index + 1
-                        end = close_index  # up to but not including close_index
-                        if end > start:
-                            segment = _low[start:end]
-                            min_val = segment.min()
-                            # In case of ties, take the last occurrence
-                            candidates = np.nonzero(segment == min_val)[0]
-                            if candidates.size:
-                                candidate_index = start + candidates[-1]
-                                obBtm = _low[candidate_index]
-                                obTop = _high[candidate_index]
-                                obIndex = candidate_index
-                    # Set bullish OB values
-                    # When causal, store at close_index (crossing bar) to avoid
-                    # retroactive writes to past bars.
-                    store_idx = close_index if causal else obIndex
-                    ob[store_idx] = 1
-                    top_arr[store_idx] = obTop
-                    bottom_arr[store_idx] = obBtm
-                    vol_cur = _volume[close_index]
-                    vol_prev1 = _volume[close_index - 1] if close_index >= 1 else 0.0
-                    vol_prev2 = _volume[close_index - 2] if close_index >= 2 else 0.0
-                    obVolume[store_idx] = vol_cur + vol_prev1 + vol_prev2
-                    lowVolume[store_idx] = vol_prev2
-                    highVolume[store_idx] = vol_cur + vol_prev1
-                    max_vol = max(highVolume[store_idx], lowVolume[store_idx])
-                    percentage[store_idx] = (min(highVolume[store_idx], lowVolume[store_idx]) / max_vol * 100.0) if max_vol != 0 else 100.0
-                    active_bullish.add(store_idx)
-
-        # Set to track active bearish order blocks (O(1) add/remove)
-        active_bearish = set()
-        for i in range(ohlc_len):
-            close_index = i
-            # Update existing bearish OB
-            to_remove = []
-            for idx in active_bearish:
-                if breaker[idx]:
-                    if not causal:
-                        if _low[close_index] < bottom_arr[idx]:
-                            ob[idx] = 0
-                            top_arr[idx] = 0.0
-                            bottom_arr[idx] = 0.0
-                            obVolume[idx] = 0.0
-                            lowVolume[idx] = 0.0
-                            highVolume[idx] = 0.0
-                            mitigated_index[idx] = 0
-                            percentage[idx] = 0.0
-                            to_remove.append(idx)
-                    else:
-                        # Causal: don't erase historical OB, just stop tracking
-                        to_remove.append(idx)
-                else:
-                    if ((not close_mitigation and _high[close_index] > top_arr[idx])
-                        or (close_mitigation and max(_open[close_index], _close[close_index]) > top_arr[idx])):
-                        breaker[idx] = True
-                        mitigated_index[idx] = close_index
-            if to_remove:
-                active_bearish.difference_update(to_remove)
-
-            # Find last confirmed swing low index less than current candle
-            if causal_half > 0:
-                limit_idx = np.searchsorted(swing_low_indices, close_index - causal_half + 1)
-            else:
-                limit_idx = np.searchsorted(swing_low_indices, close_index)
-            last_btm_index = swing_low_indices[limit_idx - 1] if limit_idx > 0 else None
-
-            if last_btm_index is not None:
-                if _close[close_index] < _low[last_btm_index] and not crossed[last_btm_index]:
-                    crossed[last_btm_index] = True
-                    default_index = close_index - 1
-                    obTop = _high[default_index]
-                    obBtm = _low[default_index]
-                    obIndex = default_index
-                    if close_index - last_btm_index > 1:
-                        start = last_btm_index + 1
-                        end = close_index
-                        if end > start:
-                            segment = _high[start:end]
-                            max_val = segment.max()
-                            candidates = np.nonzero(segment == max_val)[0]
-                            if candidates.size:
-                                candidate_index = start + candidates[-1]
-                                obTop = _high[candidate_index]
-                                obBtm = _low[candidate_index]
-                                obIndex = candidate_index
-                    store_idx = close_index if causal else obIndex
-                    ob[store_idx] = -1
-                    top_arr[store_idx] = obTop
-                    bottom_arr[store_idx] = obBtm
-                    vol_cur = _volume[close_index]
-                    vol_prev1 = _volume[close_index - 1] if close_index >= 1 else 0.0
-                    vol_prev2 = _volume[close_index - 2] if close_index >= 2 else 0.0
-                    obVolume[store_idx] = vol_cur + vol_prev1 + vol_prev2
-                    lowVolume[store_idx] = vol_cur + vol_prev1
-                    highVolume[store_idx] = vol_prev2
-                    max_vol = max(highVolume[store_idx], lowVolume[store_idx])
-                    percentage[store_idx] = (min(highVolume[store_idx], lowVolume[store_idx]) / max_vol * 100.0) if max_vol != 0 else 100.0
-                    active_bearish.add(store_idx)
+        (
+            ob, top_arr, bottom_arr, obVolume, lowVolume, highVolume,
+            percentage, mitigated_index, breaker,
+        ) = _ob_causal_loop(
+            ohlc_len, _open, _high, _low, _close, _volume,
+            swing_high_indices, swing_low_indices,
+            causal_half, close_mitigation, causal,
+        )
 
         # Convert zeros to NaN where OB was not set
         ob = np.where(ob != 0, ob, np.nan)
