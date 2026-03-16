@@ -3,7 +3,7 @@ import pandas as pd
 import numpy as np
 from pandas import DataFrame, Series
 from datetime import datetime
-from smartmoneyconcepts._numba_helpers import _fvg_causal
+from smartmoneyconcepts._numba_helpers import _fvg_causal, _bos_choch_causal_break
 
 def inputvalidator(input_="ohlc"):
     def dfcheck(func):
@@ -430,42 +430,13 @@ class smc:
                 last_positions.append(i)
 
         if causal:
-            # Bar-by-bar break validation
-            # Extract numpy arrays once to avoid pandas .iloc overhead in the loop
             break_high_arr = ohlc["close"].values if close_break else ohlc["high"].values
             break_low_arr = ohlc["close"].values if close_break else ohlc["low"].values
-
-            active_patterns = list(int(i) for i in np.where(np.logical_or(bos != 0, choch != 0))[0])
-
-            broken = np.zeros(len(ohlc), dtype=np.int32)
             n_bars = len(ohlc)
-            for bar in range(n_bars):
-                to_remove = []
-                for i in active_patterns:
-                    if bar <= i + 1:
-                        continue
-                    if bos[i] == 1 or choch[i] == 1:
-                        if break_high_arr[bar] > level[i]:
-                            broken[i] = bar
-                            # Supersession: zero earlier patterns broken at same or later bar
-                            for k in active_patterns:
-                                if k < i and broken[k] >= bar:
-                                    bos[k] = 0
-                                    choch[k] = 0
-                                    level[k] = 0
-                            to_remove.append(i)
-                    elif bos[i] == -1 or choch[i] == -1:
-                        if break_low_arr[bar] < level[i]:
-                            broken[i] = bar
-                            for k in active_patterns:
-                                if k < i and broken[k] >= bar:
-                                    bos[k] = 0
-                                    choch[k] = 0
-                                    level[k] = 0
-                            to_remove.append(i)
-                if to_remove:
-                    remove_set = set(to_remove)
-                    active_patterns = [p for p in active_patterns if p not in remove_set]
+
+            broken = _bos_choch_causal_break(
+                bos, choch, level, break_high_arr, break_low_arr, n_bars
+            )
 
             # Do NOT remove unbroken patterns (they stay with BrokenIndex=NaN)
             bos = np.where(bos != 0, bos, np.nan)

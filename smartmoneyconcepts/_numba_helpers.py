@@ -69,3 +69,59 @@ def _fvg_causal(high, low, close, open_, n, join_consecutive):
             n_active += 1
 
     return fvg, top, bottom, mitigated_index
+
+
+@njit(cache=True)
+def _bos_choch_causal_break(bos, choch, level, break_high_arr, break_low_arr, n):
+    """
+    Bar-by-bar break validation + supersession for causal BOS/CHOCH.
+
+    MODIFIES bos, choch, level IN PLACE (supersession zeroes them).
+    Returns: broken array
+    """
+    # Collect active pattern indices
+    pattern_buf = np.empty(n, dtype=np.int64)
+    n_patterns = 0
+    for i in range(n):
+        if bos[i] != 0 or choch[i] != 0:
+            pattern_buf[n_patterns] = i
+            n_patterns += 1
+
+    broken = np.zeros(n, dtype=np.int32)
+
+    for bar in range(n):
+        for p in range(n_patterns):
+            i = pattern_buf[p]
+            if i == -1:
+                continue
+            if bar <= i + 1:
+                continue
+
+            matched = False
+            if (bos[i] == 1 or choch[i] == 1) and break_high_arr[bar] > level[i]:
+                matched = True
+            elif (bos[i] == -1 or choch[i] == -1) and break_low_arr[bar] < level[i]:
+                matched = True
+
+            if matched:
+                broken[i] = np.int32(bar)
+                # Supersession: zero earlier patterns broken at same or later bar
+                for q in range(n_patterns):
+                    k = pattern_buf[q]
+                    if k == -1:
+                        continue
+                    if k < i and broken[k] >= bar:
+                        bos[k] = 0
+                        choch[k] = 0
+                        level[k] = 0.0
+                pattern_buf[p] = -1
+
+        # Compact pattern buffer
+        write = 0
+        for p in range(n_patterns):
+            if pattern_buf[p] != -1:
+                pattern_buf[write] = pattern_buf[p]
+                write += 1
+        n_patterns = write
+
+    return broken
